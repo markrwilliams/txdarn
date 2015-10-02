@@ -30,7 +30,7 @@ class ContentTypeDecoratorTestCase(unittest.SynchronousTestCase):
         @E.contentType(b'text/html')
         def assertHeaderSet(request):
             self.assertEqual(request.outgoingHeaders,
-                             {b'content-type': b'text/html; charset=utf-8'})
+                             {b'content-type': b'text/html; charset=UTF-8'})
 
         assertHeaderSet(self.request)
 
@@ -43,7 +43,7 @@ class ContentTypeDecoratorTestCase(unittest.SynchronousTestCase):
         def assertHeaderSet(request):
             self.assertEqual(request.outgoingHeaders,
                              {b'content-type':
-                              b'text/html; q=1 charset=utf-8'})
+                              b'text/html; q=1 charset=UTF-8'})
 
         assertHeaderSet(self.request)
 
@@ -56,6 +56,6 @@ class ContentTypeDecoratorTestCase(unittest.SynchronousTestCase):
             def assertHeaderSet(self, request):
                 assertEqual(request.outgoingHeaders,
                             {b'content-type':
-                             b'text/html; q=1 charset=utf-8'})
+                             b'text/html; q=1 charset=UTF-8'})
 
         FakeResource().assertHeaderSet(self.request)

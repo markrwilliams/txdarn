@@ -1,7 +1,11 @@
-from twisted.web import resource, server, template
+import eliot.testing
+from twisted.internet import defer
+from twisted.web import resource, template
 from twisted.trial import unittest
 from twisted.web.test import requesthelper
-from txdarn import static as S, encoding
+
+from txdarn import encoding
+from txdarn.resources import support as S
 
 
 SOCKJS_URL = u'http://someplace'
@@ -71,23 +75,30 @@ class IFrameElementTestCase(unittest.TestCase):
         return renderDeferred
 
 
-class IFrameResourceTestCase(unittest.TestCase):
+class IFrameResourceTestCase(unittest.SynchronousTestCase):
 
     def test_render(self):
+        '''A request for the iframe resource produces the requisite HTML'''
         resource = S.IFrameResource(SOCKJS_URL_BYTES)
         request = requesthelper.DummyRequest(['ignored'])
         request.method = b'GET'
 
-        requestDeferred = request.notifyFinish()
+        iframeWithDOCTYPE = b'\n'.join([b'<!DOCTYPE html>', STATIC_IFRAME])
+        self.assertEqual(resource.render(request), iframeWithDOCTYPE)
 
-        def assertPageContent(_):
-            content = b''.join(request.written)
-            iframeWithDOCTYPE = b'\n'.join([b'<!DOCTYPE html>', STATIC_IFRAME])
-            self.assertEqual(content, iframeWithDOCTYPE)
+    RenderingError = ValueError
 
-        requestDeferred.addCallback(assertPageContent)
+    def test_templateError(self):
+        '''An exception when rendering the iframe template becomes an
+           RuntimeError and is logged.'''
+        def badRender(*args, **kwargs):
+            return defer.fail(self.RenderingError("no good :("))
 
-        self.assertEqual(resource.render(request),
-                         server.NOT_DONE_YET)
+        with self.assertRaises(RuntimeError):
+            S.IFrameResource(SOCKJS_URL_BYTES, _render=badRender)
 
-        return requestDeferred
+    @eliot.testing.capture_logging(test_templateError,
+                                   exceptionType=RenderingError)
+    def assertFailureLogged(self, logger, exceptionType):
+        messages = logger.flush_tracebacks(exceptionType)
+        self.assertEqual(len(messages), 1)

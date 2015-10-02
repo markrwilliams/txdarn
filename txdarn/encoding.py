@@ -2,7 +2,7 @@ import functools
 from .exceptions import TxDarnException
 
 # sockjs seems to mandate utf-8
-ENCODING = 'utf-8'
+ENCODING = 'UTF-8'
 ENCODING_BYTES = ENCODING.encode('ascii')
 
 

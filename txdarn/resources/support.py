@@ -1,8 +1,12 @@
+import datetime
+import functools
 import pkgutil
+from wsgiref.handlers import format_date_time
 
 from twisted.web import resource, template
+import eliot
 
-from . import encoding
+from .. import encoding, compat
 
 
 class SlashIgnoringResource(resource.Resource):
@@ -54,11 +58,57 @@ class IFrameElement(template.Element):
 
 class IFrameResource(resource.Resource):
     isLeaf = True
+    iframe = None
+    doctype = b'<!DOCTYPE html>'
 
-    def __init__(self, sockJSURL):
+    def __init__(self, sockJSURL,
+                 _render=functools.partial(template.flattenString,
+                                           request=None)):
         resource.Resource.__init__(self)
         self.element = IFrameElement(sockJSURL)
 
+        renderingDeferred = _render(root=self.element)
+
+        def _cbSetTemplate(iframe):
+            self.iframe = b'\n'.join([self.doctype, iframe])
+
+        renderingDeferred.addCallback(_cbSetTemplate)
+        renderingDeferred.addErrback(eliot.writeFailure)
+
+        if not self.iframe:
+            raise RuntimeError("Could not render iframe!")
+
     @encoding.contentType(b'text/html')
     def render_GET(self, request):
-        return template.renderElement(request, self.element)
+        return self.iframe
+
+
+class InfoResource(resource.Resource):
+    isLeaf = True
+    accessControlMaxAge = 2000000
+
+    def __init__(self,
+                 maximumAge=31536000,
+                 _render=compat.asJSON):
+        self.maximumAge = maximumAge
+        self._render = _render
+
+    def optionsForRequest(self, request,
+                          datetimeNow=datetime.datetime.now):
+        httpNow = format_date_time(datetimeNow())
+
+        request.setHeader(b'Cache-Control',
+                          compat.networkString(
+                              "max-age=%d public" % self.maximumAge))
+
+        request.setHeader(b'Expires',
+                          compat.networkString(httpNow))
+
+        request.setHeader(b'access-control-max-age',
+                          compat.intToBytes(self.accessControlMaxAge))
+
+        request.setHeader(b'Access-Control-Allow-Methods')
+
+    @encoding.contentType(b'application/json')
+    def render_GET(self, request):
+        self._render({})
