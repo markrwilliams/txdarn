@@ -41,17 +41,19 @@ class SlashIgnoringResourceTestCase(unittest.SynchronousTestCase):
         self.childResource = SimpleResource()
         self.resource.putChild(b'simple', self.childResource)
 
-    def test_getChild_withoutSlash(self):
+    def test_getChildWithDefault_withoutSlash(self):
         request = requesthelper.DummyRequest([])
         request.prepath = []
-        self.assertIdentical(self.resource.getChild(self.path, request),
-                             self.childResource)
+        self.assertIdentical(
+            self.resource.getChildWithDefault(self.path, request),
+            self.childResource)
 
-    def test_getChild_withSlash(self):
+    def test_getChildWithDefault_withSlash(self):
         request = requesthelper.DummyRequest([])
         request.prepath = [self.path]
-        self.assertIdentical(self.resource.getChild(b'', request),
-                             self.childResource)
+        self.assertIdentical(
+            self.resource.getChildWithDefault(b'', request),
+            self.childResource)
 
 
 class GreetingTestCase(unittest.SynchronousTestCase):

@@ -11,14 +11,13 @@ from .. import encoding, compat
 
 class SlashIgnoringResource(resource.Resource):
 
-    def getChild(self, name, request):
+    def getChildWithDefault(self, name, request):
         if not name:
             name = request.prepath[-1]
         return resource.Resource.getChildWithDefault(self, name, request)
 
 
 class Greeting(resource.Resource):
-    isLeaf = True
 
     @encoding.contentType(b'text/plain')
     def render_GET(self, request):
@@ -57,7 +56,6 @@ class IFrameElement(template.Element):
 
 
 class IFrameResource(resource.Resource):
-    isLeaf = True
     iframe = None
     doctype = b'<!DOCTYPE html>'
 
@@ -84,18 +82,18 @@ class IFrameResource(resource.Resource):
 
 
 class InfoResource(resource.Resource):
-    isLeaf = True
     accessControlMaxAge = 2000000
 
     def __init__(self,
                  maximumAge=31536000,
-                 _render=compat.asJSON):
+                 _render=compat.asJSON,
+                 _now=datetime.datetime.utcnow):
         self.maximumAge = maximumAge
         self._render = _render
+        self._now = _now
 
-    def optionsForRequest(self, request,
-                          datetimeNow=datetime.datetime.now):
-        httpNow = format_date_time(datetimeNow())
+    def optionsForRequest(self, request):
+        httpNow = format_date_time(self._now)
 
         request.setHeader(b'Cache-Control',
                           compat.networkString(
