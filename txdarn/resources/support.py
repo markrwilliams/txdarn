@@ -1,9 +1,10 @@
+import hashlib
 import datetime
 import functools
 import pkgutil
 from wsgiref.handlers import format_date_time
 
-from twisted.web import resource, template
+from twisted.web import resource, template, http
 import eliot
 
 from .. import encoding, compat
@@ -11,13 +12,13 @@ from .. import encoding, compat
 
 class SlashIgnoringResource(resource.Resource):
 
-    def getChildWithDefault(self, name, request):
-        if not name:
-            name = request.prepath[-1]
-        return resource.Resource.getChildWithDefault(self, name, request)
+    def getChild(self, name, request):
+        if not (name or request.postpath):
+            return self
+        return resource.Resource.getChild(self, name, request)
 
 
-class Greeting(resource.Resource):
+class Greeting(SlashIgnoringResource):
 
     @encoding.contentType(b'text/plain')
     def render_GET(self, request):
@@ -57,6 +58,7 @@ class IFrameElement(template.Element):
 
 class IFrameResource(resource.Resource):
     iframe = None
+    etag = None
     doctype = b'<!DOCTYPE html>'
 
     def __init__(self, sockJSURL,
@@ -76,12 +78,17 @@ class IFrameResource(resource.Resource):
         if not self.iframe:
             raise RuntimeError("Could not render iframe!")
 
+        hashed = hashlib.sha256(self.iframe).hexdigest()
+        self.etag = compat.networkString(hashed)
+
     @encoding.contentType(b'text/html')
     def render_GET(self, request):
+        if request.setETag(self.etag) is http.CACHED:
+            return b''
         return self.iframe
 
 
-class InfoResource(resource.Resource):
+class InfoResource(SlashIgnoringResource):
     accessControlMaxAge = 2000000
 
     def __init__(self,

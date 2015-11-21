@@ -17,7 +17,7 @@ if six.PY3:
         return str(integer).encode('ascii')
 
     def networkString(s):
-        if not isinstance(s, unicode):
+        if not isinstance(s, str):
             raise TypeError("Can only convert text to bytes on Python 3")
         return s.encode('ascii')
 else:

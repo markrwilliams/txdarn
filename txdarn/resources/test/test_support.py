@@ -29,34 +29,31 @@ STATIC_IFRAME = (u'''\
 </html>''' % (SOCKJS_URL)).encode(encoding.ENCODING)
 
 
-class SimpleResource(resource.Resource):
-    isLeaf = True
-
-
-class SlashIgnoringResourceTestCase(unittest.SynchronousTestCase):
+class SlashIgnoringResourceTestCaseMixin(object):
 
     def setUp(self):
-        self.resource = S.SlashIgnoringResource()
+        super(SlashIgnoringResourceTestCaseMixin, self).setUp()
+        self.resource = resource.Resource()
         self.path = b'simple'
-        self.childResource = SimpleResource()
+        self.childResource = self.resourceClass()
         self.resource.putChild(b'simple', self.childResource)
 
     def test_getChildWithDefault_withoutSlash(self):
-        request = requesthelper.DummyRequest([])
-        request.prepath = []
+        request = requesthelper.DummyRequest([self.path])
         self.assertIdentical(
-            self.resource.getChildWithDefault(self.path, request),
+            resource.getChildForRequest(self.resource, request),
             self.childResource)
 
     def test_getChildWithDefault_withSlash(self):
-        request = requesthelper.DummyRequest([])
-        request.prepath = [self.path]
+        request = requesthelper.DummyRequest([self.path, ''])
         self.assertIdentical(
-            self.resource.getChildWithDefault(b'', request),
+            resource.getChildForRequest(self.resource, request),
             self.childResource)
 
 
-class GreetingTestCase(unittest.SynchronousTestCase):
+class GreetingTestCase(SlashIgnoringResourceTestCaseMixin,
+                       unittest.SynchronousTestCase):
+    resourceClass = S.Greeting
 
     def test_get(self):
         request = requesthelper.DummyRequest(['ignored'])
@@ -77,7 +74,9 @@ class IFrameElementTestCase(unittest.TestCase):
         return renderDeferred
 
 
-class IFrameResourceTestCase(unittest.SynchronousTestCase):
+class IFrameResourceTestCase(SlashIgnoringResourceTestCaseMixin,
+                             unittest.SynchronousTestCase):
+    resourceClass = S.Greeting
 
     def test_render(self):
         '''A request for the iframe resource produces the requisite HTML'''

@@ -11,3 +11,6 @@ class TestCompat(unittest.SynchronousTestCase):
 
     def test_intToBytes(self):
         self.assertEqual(C.intToBytes(1024), b'1024')
+
+    def test_networkString(self):
+        self.assertEqual(C.networkString('abc'), b'abc')

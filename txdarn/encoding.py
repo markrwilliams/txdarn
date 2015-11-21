@@ -30,8 +30,10 @@ class _contentTypeDecorator(object):
                               self.formattedContentType)
 
     def __call__(self, request, *args, **kwargs):
-        request.setHeader(b'Content-Type', self.formattedContentType)
-        return self.callableObject(request, *args, **kwargs)
+        result = self.callableObject(request, *args, **kwargs)
+        if result:
+            request.setHeader(b'Content-Type', self.formattedContentType)
+        return result
 
 
 def contentType(contentType, params=()):

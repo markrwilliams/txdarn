@@ -18,7 +18,7 @@ class ContentTypeDecoratorTestCase(unittest.SynchronousTestCase):
 
             @E.contentType(b"application/json; charset=UTF-8")
             def neverCalled(request):
-                pass
+                return b'ok'
 
         self.assertFalse(self.request.outgoingHeaders)
 
@@ -28,11 +28,12 @@ class ContentTypeDecoratorTestCase(unittest.SynchronousTestCase):
         '''
 
         @E.contentType(b'text/html')
-        def assertHeaderSet(request):
-            self.assertEqual(request.outgoingHeaders,
-                             {b'content-type': b'text/html; charset=UTF-8'})
+        def handler(request):
+            return b'ok'
 
-        assertHeaderSet(self.request)
+        handler(self.request)
+        self.assertEqual(self.request.outgoingHeaders,
+                         {b'content-type': b'text/html; charset=UTF-8'})
 
     def test_withParams(self):
         '''
@@ -40,22 +41,38 @@ class ContentTypeDecoratorTestCase(unittest.SynchronousTestCase):
         '''
 
         @E.contentType(b'text/html', params=[(b'q', b'1')])
-        def assertHeaderSet(request):
-            self.assertEqual(request.outgoingHeaders,
-                             {b'content-type':
-                              b'text/html; q=1 charset=UTF-8'})
+        def handler(request):
+            return b'ok'
 
-        assertHeaderSet(self.request)
+        handler(self.request)
+        self.assertEqual(self.request.outgoingHeaders,
+                         {b'content-type':
+                          b'text/html; q=1 charset=UTF-8'})
 
     def test_decoratedMethod(self):
-        assertEqual = self.assertEqual
+        '''
+        A decorated method should work
+        '''
 
         class FakeResource(object):
 
             @E.contentType(b'text/html', params=[(b'q', b'1')])
-            def assertHeaderSet(self, request):
-                assertEqual(request.outgoingHeaders,
-                            {b'content-type':
-                             b'text/html; q=1 charset=UTF-8'})
+            def handler(self, request):
+                return b'ok'
 
-        FakeResource().assertHeaderSet(self.request)
+        FakeResource().handler(self.request)
+        self.assertEqual(self.request.outgoingHeaders,
+                         {b'content-type':
+                          b'text/html; q=1 charset=UTF-8'})
+
+    def test_emptyResponse(self):
+        '''
+        An empty response gets no Content-Type
+        '''
+
+        @E.contentType(b'text/html')
+        def getsNoHeader(request):
+            pass
+
+        getsNoHeader(self.request)
+        self.assertEqual(self.request.outgoingHeaders, {})
