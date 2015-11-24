@@ -4,10 +4,25 @@ import functools
 import pkgutil
 from wsgiref.handlers import format_date_time
 
-from twisted.web import resource, template, http
 import eliot
+from twisted.web import resource, template, http
+from twisted.python.constants import Names, ValueConstant
 
 from .. import encoding, compat
+from . import headers
+
+
+DEFAULT_CACHEABLE_POLICY = headers.CachePolicy(
+    cacheDirectives=(headers.PUBLIC,
+                     headers.MAX_AGE(headers.ONE_YEAR)),
+    expiresOffset=1234)
+
+DEFAULT_UNCACHEABLE_POLICY = headers.CachePolicy(
+    cacheDirectives=(headers.NO_STORE,
+                     headers.NO_CACHE(),
+                     headers.MUST_REVALIDATE,
+                     headers.MAX_AGE(0)),
+    expiresOffset=None)
 
 
 class SlashIgnoringResource(resource.Resource):
@@ -16,6 +31,17 @@ class SlashIgnoringResource(resource.Resource):
         if not (name or request.postpath):
             return self
         return resource.Resource.getChild(self, name, request)
+
+
+class PolicyApplyingResource(resource.Resource):
+
+    def __init__(self, policies):
+        self.policies = policies
+
+    def applyPolicies(self, request):
+        for policy in self.policies:
+            request = policy.apply(request)
+        return request
 
 
 class Greeting(SlashIgnoringResource):
@@ -56,15 +82,20 @@ class IFrameElement(template.Element):
         return tag()
 
 
-class IFrameResource(resource.Resource):
+class IFrameResource(PolicyApplyingResource):
     iframe = None
     etag = None
     doctype = b'<!DOCTYPE html>'
 
-    def __init__(self, sockJSURL,
+    def __init__(self,
+                 sockJSURL,
+                 policies=(DEFAULT_CACHEABLE_POLICY,
+                           headers.AccessControlPolicy(methods=(b'GET',
+                                                                b'OPTIONS'),
+                                                       maxAge=2000000)),
                  _render=functools.partial(template.flattenString,
                                            request=None)):
-        resource.Resource.__init__(self)
+        PolicyApplyingResource.__init__(self, policies)
         self.element = IFrameElement(sockJSURL)
 
         renderingDeferred = _render(root=self.element)
@@ -85,34 +116,22 @@ class IFrameResource(resource.Resource):
     def render_GET(self, request):
         if request.setETag(self.etag) is http.CACHED:
             return b''
+        request = self.applyPolicies(request)
         return self.iframe
 
 
-class InfoResource(SlashIgnoringResource):
-    accessControlMaxAge = 2000000
+class InfoResource(PolicyApplyingResource, SlashIgnoringResource):
 
     def __init__(self,
-                 maximumAge=31536000,
+                 policies=(DEFAULT_CACHEABLE_POLICY,
+                           headers.AccessControlPolicy(methods=(b'GET',
+                                                                b'OPTIONS'),
+                                                       maxAge=2000000)),
                  _render=compat.asJSON,
                  _now=datetime.datetime.utcnow):
-        self.maximumAge = maximumAge
+        PolicyApplyingResource.__init__(self, policies)
         self._render = _render
         self._now = _now
-
-    def optionsForRequest(self, request):
-        httpNow = format_date_time(self._now)
-
-        request.setHeader(b'Cache-Control',
-                          compat.networkString(
-                              "max-age=%d public" % self.maximumAge))
-
-        request.setHeader(b'Expires',
-                          compat.networkString(httpNow))
-
-        request.setHeader(b'access-control-max-age',
-                          compat.intToBytes(self.accessControlMaxAge))
-
-        request.setHeader(b'Access-Control-Allow-Methods')
 
     @encoding.contentType(b'application/json')
     def render_GET(self, request):

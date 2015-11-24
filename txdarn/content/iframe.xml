@@ -2,11 +2,11 @@
 <head>
   <meta t:render="xUACompatible" />
   <meta t:render="contentType" />
+  <script t:render="sockjsLocation"></script>
   <script>
     document.domain = document.domain;
-    _sockjs_onload = function(){SockJS.bootstrap_iframe();};
+    SockJS.bootstrap_iframe();
   </script>
-  <script t:render="sockjsLocation"></script>
 </head>
 <body>
   <h2>Don't panic!</h2>
