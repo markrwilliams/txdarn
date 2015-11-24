@@ -16,11 +16,11 @@ STATIC_IFRAME = (u'''\
 <head>
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+  <script src="%s"></script>
   <script>
     document.domain = document.domain;
-    _sockjs_onload = function(){SockJS.bootstrap_iframe();};
+    SockJS.bootstrap_iframe();
   </script>
-  <script src="%s"></script>
 </head>
 <body>
   <h2>Don't panic!</h2>
