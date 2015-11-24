@@ -15,7 +15,7 @@ from . import headers
 DEFAULT_CACHEABLE_POLICY = headers.CachePolicy(
     cacheDirectives=(headers.PUBLIC,
                      headers.MAX_AGE(headers.ONE_YEAR)),
-    expiresOffset=1234)
+    expiresOffset=headers.ONE_YEAR)
 
 DEFAULT_UNCACHEABLE_POLICY = headers.CachePolicy(
     cacheDirectives=(headers.NO_STORE,
