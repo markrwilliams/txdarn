@@ -2,11 +2,9 @@ import hashlib
 import datetime
 import functools
 import pkgutil
-from wsgiref.handlers import format_date_time
 
 import eliot
 from twisted.web import resource, template, http
-from twisted.python.constants import Names, ValueConstant
 
 from .. import encoding, compat
 from . import headers
