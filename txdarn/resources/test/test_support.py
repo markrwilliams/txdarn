@@ -1,6 +1,6 @@
 import eliot.testing
 from twisted.internet import defer
-from twisted.web import resource, template
+from twisted.web import template
 from twisted.trial import unittest
 from twisted.web.test import requesthelper
 
@@ -29,31 +29,7 @@ STATIC_IFRAME = (u'''\
 </html>''' % (SOCKJS_URL)).encode(encoding.ENCODING)
 
 
-class SlashIgnoringResourceTestCaseMixin(object):
-
-    def setUp(self):
-        super(SlashIgnoringResourceTestCaseMixin, self).setUp()
-        self.resource = resource.Resource()
-        self.path = b'simple'
-        self.childResource = self.resourceClass()
-        self.resource.putChild(b'simple', self.childResource)
-
-    def test_getChildWithDefault_withoutSlash(self):
-        request = requesthelper.DummyRequest([self.path])
-        self.assertIdentical(
-            resource.getChildForRequest(self.resource, request),
-            self.childResource)
-
-    def test_getChildWithDefault_withSlash(self):
-        request = requesthelper.DummyRequest([self.path, ''])
-        self.assertIdentical(
-            resource.getChildForRequest(self.resource, request),
-            self.childResource)
-
-
-class GreetingTestCase(SlashIgnoringResourceTestCaseMixin,
-                       unittest.SynchronousTestCase):
-    resourceClass = S.Greeting
+class GreetingTestCase(unittest.SynchronousTestCase):
 
     def test_get(self):
         request = requesthelper.DummyRequest(['ignored'])
@@ -74,18 +50,16 @@ class IFrameElementTestCase(unittest.TestCase):
         return renderDeferred
 
 
-class IFrameResourceTestCase(SlashIgnoringResourceTestCaseMixin,
-                             unittest.SynchronousTestCase):
-    resourceClass = S.Greeting
+class IFrameResourceTestCase(unittest.SynchronousTestCase):
 
     def test_render(self):
         '''A request for the iframe resource produces the requisite HTML'''
-        resource = S.IFrameResource(SOCKJS_URL_BYTES)
+        iframe = S.IFrameResource(SOCKJS_URL_BYTES)
         request = requesthelper.DummyRequest(['ignored'])
         request.method = b'GET'
 
         iframeWithDOCTYPE = b'\n'.join([b'<!DOCTYPE html>', STATIC_IFRAME])
-        self.assertEqual(resource.render(request), iframeWithDOCTYPE)
+        self.assertEqual(iframe.render(request), iframeWithDOCTYPE)
 
     RenderingError = ValueError
 

@@ -1,8 +1,8 @@
+
 import hashlib
 import datetime
 import functools
 import pkgutil
-
 import eliot
 from twisted.web import resource, template, http
 
@@ -17,32 +17,14 @@ DEFAULT_CACHEABLE_POLICY = headers.CachePolicy(
 
 DEFAULT_UNCACHEABLE_POLICY = headers.CachePolicy(
     cacheDirectives=(headers.NO_STORE,
-                     headers.NO_CACHE(),
+                     headers.NO_CACHE,
                      headers.MUST_REVALIDATE,
                      headers.MAX_AGE(0)),
     expiresOffset=None)
 
 
-class SlashIgnoringResource(resource.Resource):
-
-    def getChild(self, name, request):
-        if not (name or request.postpath):
-            return self
-        return resource.Resource.getChild(self, name, request)
-
-
-class PolicyApplyingResource(resource.Resource):
-
-    def __init__(self, policies):
-        self.policies = policies
-
-    def applyPolicies(self, request):
-        for policy in self.policies:
-            request = policy.apply(request)
-        return request
-
-
-class Greeting(SlashIgnoringResource):
+class Greeting(resource.Resource):
+    isLeaf = True
 
     @encoding.contentType(b'text/plain')
     def render_GET(self, request):
@@ -80,7 +62,9 @@ class IFrameElement(template.Element):
         return tag()
 
 
-class IFrameResource(PolicyApplyingResource):
+class IFrameResource(headers.HeaderPolicyApplyingResource):
+    isLeaf = True
+
     iframe = None
     etag = None
     doctype = b'<!DOCTYPE html>'
@@ -93,7 +77,7 @@ class IFrameResource(PolicyApplyingResource):
                                                        maxAge=2000000)),
                  _render=functools.partial(template.flattenString,
                                            request=None)):
-        PolicyApplyingResource.__init__(self, policies)
+        headers.HeaderPolicyApplyingResource.__init__(self, policies)
         self.element = IFrameElement(sockJSURL)
 
         renderingDeferred = _render(root=self.element)
@@ -118,7 +102,8 @@ class IFrameResource(PolicyApplyingResource):
         return self.iframe
 
 
-class InfoResource(PolicyApplyingResource, SlashIgnoringResource):
+class InfoResource(headers.HeaderPolicyApplyingResource):
+    isLeaf = True
 
     def __init__(self,
                  policies=(DEFAULT_CACHEABLE_POLICY,
@@ -127,7 +112,7 @@ class InfoResource(PolicyApplyingResource, SlashIgnoringResource):
                                                        maxAge=2000000)),
                  _render=compat.asJSON,
                  _now=datetime.datetime.utcnow):
-        PolicyApplyingResource.__init__(self, policies)
+        headers.HeaderPolicyApplyingResource.__init__(self, policies)
         self._render = _render
         self._now = _now
 

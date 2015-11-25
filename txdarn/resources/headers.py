@@ -1,25 +1,20 @@
 import time
 from collections import namedtuple
-
 from wsgiref.handlers import format_date_time
+
+from twisted.web import resource
 from .. import compat
 
 
 PUBLIC = b'public'
+NO_CACHE = b'no-cache'          # TODO: this should be a function,
+                                # that takes fields
 NO_STORE = b'no-store'
 MUST_REVALIDATE = b'must-revalidate'
 
 
 def MAX_AGE(age):
     return compat.networkString('max-age={:d}'.format(age))
-
-
-def NO_CACHE(*fields):
-    if fields:
-        value = '=' + ','.join(fields)
-    else:
-        value = ''
-    return compat.networkString('no-cache' + value)
 
 
 ONE_YEAR = 3153600
@@ -93,4 +88,15 @@ class AccessControlPolicy(namedtuple('AccessControlPolicy',
             request.setHeader(b'access-control-allow-credentials',
                               credentialsAllowed)
 
+        return request
+
+
+class HeaderPolicyApplyingResource(resource.Resource):
+
+    def __init__(self, policies):
+        self.policies = policies
+
+    def applyPolicies(self, request):
+        for policy in self.policies:
+            request = policy.apply(request)
         return request

@@ -37,7 +37,7 @@ class CachePolicyTestCase(PolicyTestCase):
         cacheDirectives and expiresOffset can assign headers to disable caching
         '''
         cacheDirectives = (H.NO_STORE,
-                           H.NO_CACHE(),
+                           H.NO_CACHE,
                            H.MUST_REVALIDATE,
                            H.MAX_AGE(0))
 
