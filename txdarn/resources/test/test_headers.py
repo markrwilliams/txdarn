@@ -64,8 +64,8 @@ class AccessControlPolicyTestCase(PolicyTestCase):
         '''
         allowOrigin allows any specific domain given or returns *
         '''
-        cases = [(b'null', b'*'),
-                 (None, b'*'),
+        cases = [(None, b'*'),
+                 (b'null', b'null'),
                  (b'test', b'test')]
         for value, expected in cases:
             actual = H.allowOrigin(self.dummyPolicy,
@@ -96,7 +96,7 @@ class AccessControlPolicyTestCase(PolicyTestCase):
         expectedHeaders[b'access-control-max-age'] = b'1234'
 
         self.request.headers[b'origin'] = b'test'
-        expectedHeaders[b'access-control-allowed-origin'] = b'test'
+        expectedHeaders[b'access-control-allow-origin'] = b'test'
         expectedHeaders[b'access-control-allow-credentials'] = b'true'
 
         policy = H.AccessControlPolicy(methods=methods,

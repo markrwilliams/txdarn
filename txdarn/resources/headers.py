@@ -48,7 +48,7 @@ class CachePolicy(namedtuple('CachePolicy',
 
 
 def allowOrigin(policy, request, origin):
-    if origin in (b'null', None):
+    if origin is None:
         return b'*'
     return origin
 
@@ -83,7 +83,7 @@ class AccessControlPolicy(namedtuple('AccessControlPolicy',
         request.setHeader(b'access-control-allow-methods', methods)
         request.setHeader(b'access-control-max-age', maxAge)
 
-        request.setHeader(b'access-control-allowed-origin', allowedOrigin)
+        request.setHeader(b'access-control-allow-origin', allowedOrigin)
         if credentialsAllowed:
             request.setHeader(b'access-control-allow-credentials',
                               credentialsAllowed)

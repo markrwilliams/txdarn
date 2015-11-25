@@ -1,4 +1,4 @@
-
+import random
 import hashlib
 import datetime
 import functools
@@ -102,20 +102,54 @@ class IFrameResource(headers.HeaderPolicyApplyingResource):
         return self.iframe
 
 
-class InfoResource(headers.HeaderPolicyApplyingResource):
+class OptionsSubResource(headers.HeaderPolicyApplyingResource):
     isLeaf = True
 
-    def __init__(self,
-                 policies=(DEFAULT_CACHEABLE_POLICY,
-                           headers.AccessControlPolicy(methods=(b'GET',
-                                                                b'OPTIONS'),
-                                                       maxAge=2000000)),
-                 _render=compat.asJSON,
-                 _now=datetime.datetime.utcnow):
+    def __init__(self, policies):
         headers.HeaderPolicyApplyingResource.__init__(self, policies)
+
+    def render_OPTIONS(self, request):
+        self.applyPolicies(request)
+        return b''
+
+
+class InfoResource(headers.HeaderPolicyApplyingResource):
+    isLeaf = True
+    entropyRange = (0, 1 << 32)
+
+    def __init__(self,
+                 websocketsEnabled=True,
+                 cookiesNeeded=True,
+                 allowedOrigins=('*:*',),
+                 policies=(DEFAULT_UNCACHEABLE_POLICY,
+                           headers.AccessControlPolicy(methods=(b'GET',),
+                                                       maxAge=2000000)),
+                 infoPolicies=(
+                     DEFAULT_CACHEABLE_POLICY,
+                     headers.AccessControlPolicy(methods=(b'GET',
+                                                          b'OPTIONS'),
+                                                 maxAge=2000000)),
+                 _render=compat.asJSON,
+                 _random=random.SystemRandom().randrange):
+        headers.HeaderPolicyApplyingResource.__init__(self, policies)
+
+        self.websocketsEnabled = websocketsEnabled
+        self.cookiesNeeded = cookiesNeeded
+        self.allowedOrigins = list(allowedOrigins)
+
         self._render = _render
-        self._now = _now
+        self._random = _random
+
+        self.optionsResource = OptionsSubResource(infoPolicies)
+        self.render_OPTIONS = self.optionsResource.render_OPTIONS
+
+    def calculateEntropy(self):
+        return self._random(*self.entropyRange)
 
     @encoding.contentType(b'application/json')
     def render_GET(self, request):
-        self._render({})
+        self.applyPolicies(request)
+        return self._render({'websocket': self.websocketsEnabled,
+                             'cookie_needed': self.cookiesNeeded,
+                             'origins': self.allowedOrigins,
+                             'entropy': self.calculateEntropy()})

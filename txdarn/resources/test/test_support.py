@@ -1,4 +1,5 @@
 import eliot.testing
+import re
 from twisted.internet import defer
 from twisted.web import template
 from twisted.trial import unittest
@@ -32,7 +33,7 @@ STATIC_IFRAME = (u'''\
 class GreetingTestCase(unittest.SynchronousTestCase):
 
     def test_get(self):
-        request = requesthelper.DummyRequest(['ignored'])
+        request = requesthelper.DummyRequest([b'ignored'])
         request.method = b'GET'
         expected = b'Welcome to SockJS!\n'
         self.assertEqual(S.Greeting().render(request),
@@ -55,7 +56,7 @@ class IFrameResourceTestCase(unittest.SynchronousTestCase):
     def test_render(self):
         '''A request for the iframe resource produces the requisite HTML'''
         iframe = S.IFrameResource(SOCKJS_URL_BYTES)
-        request = requesthelper.DummyRequest(['ignored'])
+        request = requesthelper.DummyRequest([b'ignored'])
         request.method = b'GET'
 
         iframeWithDOCTYPE = b'\n'.join([b'<!DOCTYPE html>', STATIC_IFRAME])
@@ -77,3 +78,65 @@ class IFrameResourceTestCase(unittest.SynchronousTestCase):
     def assertFailureLogged(self, logger, exceptionType):
         messages = logger.flush_tracebacks(exceptionType)
         self.assertEqual(len(messages), 1)
+
+
+class OptionsSubResourceTestCaseMixin:
+    resourceClass = S.OptionsSubResource
+
+    def test_options(self):
+        request = requesthelper.DummyRequest([b'ignored'])
+        request.method = 'OPTIONS'
+
+        optionsResource = self.resourceClass()
+
+        written = optionsResource.render(request)
+        outgoingHeaders = request.outgoingHeaders
+
+        cache_control = outgoingHeaders[b'cache-control']
+        self.assertIn(b'public', cache_control)
+        self.assertTrue(re.search(b'max-age=[1-9]\d{6}', cache_control),
+                        'SockJS demands a "large" max-age')
+
+        self.assertIn(b'expires', outgoingHeaders)
+        self.assertGreater(int(outgoingHeaders[b'access-control-max-age']),
+                           1000000)
+        # TODO - test methods
+        self.assertFalse(written)
+
+
+class InfoResourceTestCase(OptionsSubResourceTestCaseMixin,
+                           unittest.TestCase):
+    resourceClass = S.InfoResource
+
+    def fakeRandRange(self, minimum, maximum):
+        self.assertEqual((minimum, maximum), self.resourceClass.entropyRange)
+        self._entropyCalled = True
+        return 42
+
+    def fakeRender(self, data):
+        return data
+
+    def setUp(self):
+        self._entropyCalled = False
+        self._data = None
+        self.config = {'websocketsEnabled': False,
+                       'cookiesNeeded': True}
+        self.info = self.resourceClass(_render=self.fakeRender,
+                                       _random=self.fakeRandRange,
+                                       **self.config)
+
+    def test_calculateEntropy(self):
+        self.assertEqual(self.info.calculateEntropy(), 42)
+        self.assertTrue(self._entropyCalled)
+
+    def test_get(self):
+        request = requesthelper.DummyRequest([b'ignored'])
+        request.method = b'GET'
+
+        result = self.info.render(request)
+
+        self.assertEqual({'websocket': self.config['websocketsEnabled'],
+                          'cookie_needed': self.config['cookiesNeeded'],
+                          'origins': ['*:*'],
+                          'entropy': 42},
+                         result)
