@@ -1,6 +1,5 @@
 import random
 import hashlib
-import datetime
 import functools
 import pkgutil
 import eliot
@@ -23,8 +22,13 @@ DEFAULT_UNCACHEABLE_POLICY = headers.CachePolicy(
     expiresOffset=None)
 
 
+DEFAULT_ACCESS_CONTROL_POLICY = headers.AccessControlPolicy(
+    methods=headers.INFERRED, maxAge=2000000)
+
+
 class Greeting(resource.Resource):
     isLeaf = True
+    allowedMethods = ('GET',)
 
     @encoding.contentType(b'text/plain')
     def render_GET(self, request):
@@ -64,26 +68,30 @@ class IFrameElement(template.Element):
 
 class IFrameResource(headers.HeaderPolicyApplyingResource):
     isLeaf = True
+    allowedMethods = ('GET',)
+
+    policies = headers.ImmutableDict(
+        {b'GET': (DEFAULT_CACHEABLE_POLICY,
+                  DEFAULT_ACCESS_CONTROL_POLICY)})
 
     iframe = None
     etag = None
-    doctype = b'<!DOCTYPE html>'
+
+    _doctype = b'<!DOCTYPE html>'
 
     def __init__(self,
                  sockJSURL,
-                 policies=(DEFAULT_CACHEABLE_POLICY,
-                           headers.AccessControlPolicy(methods=(b'GET',
-                                                                b'OPTIONS'),
-                                                       maxAge=2000000)),
+                 policies=None,
                  _render=functools.partial(template.flattenString,
                                            request=None)):
-        headers.HeaderPolicyApplyingResource.__init__(self, policies)
+        headers.HeaderPolicyApplyingResource.__init__(self, self.policies)
+
         self.element = IFrameElement(sockJSURL)
 
         renderingDeferred = _render(root=self.element)
 
         def _cbSetTemplate(iframe):
-            self.iframe = b'\n'.join([self.doctype, iframe])
+            self.iframe = b'\n'.join([self._doctype, iframe])
 
         renderingDeferred.addCallback(_cbSetTemplate)
         renderingDeferred.addErrback(eliot.writeFailure)
@@ -102,33 +110,24 @@ class IFrameResource(headers.HeaderPolicyApplyingResource):
         return self.iframe
 
 
-class OptionsSubResource(headers.HeaderPolicyApplyingResource):
-    isLeaf = True
-
-    def __init__(self, policies):
-        headers.HeaderPolicyApplyingResource.__init__(self, policies)
-
-    def render_OPTIONS(self, request):
-        self.applyPolicies(request)
-        return b''
-
-
 class InfoResource(headers.HeaderPolicyApplyingResource):
+    allowedMethods = ('GET', 'OPTIONS')
     isLeaf = True
+
+    policies = headers.ImmutableDict(
+        {b'GET': (DEFAULT_UNCACHEABLE_POLICY,
+                  DEFAULT_ACCESS_CONTROL_POLICY._replace(
+                      methods=(b'GET',))),
+         b'OPTIONS': (DEFAULT_CACHEABLE_POLICY,
+                      DEFAULT_ACCESS_CONTROL_POLICY)})
+
     entropyRange = (0, 1 << 32)
 
     def __init__(self,
                  websocketsEnabled=True,
                  cookiesNeeded=True,
                  allowedOrigins=('*:*',),
-                 policies=(DEFAULT_UNCACHEABLE_POLICY,
-                           headers.AccessControlPolicy(methods=(b'GET',),
-                                                       maxAge=2000000)),
-                 infoPolicies=(
-                     DEFAULT_CACHEABLE_POLICY,
-                     headers.AccessControlPolicy(methods=(b'GET',
-                                                          b'OPTIONS'),
-                                                 maxAge=2000000)),
+                 policies=None,
                  _render=compat.asJSON,
                  _random=random.SystemRandom().randrange):
         headers.HeaderPolicyApplyingResource.__init__(self, policies)
@@ -140,11 +139,12 @@ class InfoResource(headers.HeaderPolicyApplyingResource):
         self._render = _render
         self._random = _random
 
-        self.optionsResource = OptionsSubResource(infoPolicies)
-        self.render_OPTIONS = self.optionsResource.render_OPTIONS
-
     def calculateEntropy(self):
         return self._random(*self.entropyRange)
+
+    def render_OPTIONS(self, request):
+        self.applyPolicies(request)
+        return b''
 
     @encoding.contentType(b'application/json')
     def render_GET(self, request):

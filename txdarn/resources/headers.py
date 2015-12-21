@@ -2,8 +2,30 @@ import time
 from collections import namedtuple
 from wsgiref.handlers import format_date_time
 
+import six
+
 from twisted.web import resource
+from zope.interface import Interface, implementer
 from .. import compat
+
+
+class ImmutableDict(compat.Mapping):
+
+    def __init__(self, *args, **kwargs):
+        self._dict = dict(*args, **kwargs)
+
+    def __getitem__(self, key):
+        return self._dict[key]
+
+    def __iter__(self):
+        return iter(self._dict)
+
+    def __len__(self):
+        return len(self._dict)
+
+    def __repr__(self):
+        className = self.__class__.__name__
+        return '{}({!r})'.format(className, self._dict)
 
 
 PUBLIC = b'public'
@@ -24,6 +46,42 @@ def httpMultiValue(values):
     return b', '.join(values)
 
 
+# use me to tell AccessControlPolicy to ask the resource about what
+# methods it supports
+INFERRED = 'INFERRED'
+
+
+class IHeaderPolicy(Interface):
+    '''
+    A header policy
+
+    I encapsulate Response header additions that depend on the
+    incoming request.
+
+    Use me with L{HeaderPolicyApplyingResource}.
+    '''
+
+    def forResource(resource):
+        '''
+        Return a Policy object configured for the the provided resource.
+        Implement this if your policy needs to inspect the resource
+        whose responses the policy will modify.
+
+        @param resource: a C{twisted.web.resource.Resource} instance
+        @type resource: L{twisted.web.resource.Resource}
+        '''
+
+    def apply(request):
+        '''
+        Apply this header policy to the given request.
+
+        @param request: a C{twisted.web.server.Request} instance.  It
+        should not be finished.
+        @type resource: L{twisted.web.server.Request}
+        '''
+
+
+@implementer(IHeaderPolicy)
 class CachePolicy(namedtuple('CachePolicy',
                              ('cacheDirectives',
                               'expiresOffset',
@@ -35,6 +93,9 @@ class CachePolicy(namedtuple('CachePolicy',
                                                cacheDirectives,
                                                expiresOffset,
                                                cacheControlFormatted)
+
+    def forResource(self, resource):
+        return self
 
     def apply(self, request, now=time.time):
         if self.expiresOffset is not None:
@@ -58,6 +119,7 @@ def allowCredentials(policy, request, origin):
         return b'true'
 
 
+@implementer(IHeaderPolicy)
 class AccessControlPolicy(namedtuple('AccessControlPolicy',
                                      ['methods',
                                       'maxAge',
@@ -69,6 +131,20 @@ class AccessControlPolicy(namedtuple('AccessControlPolicy',
                 allowCredentials=allowCredentials):
         return super(AccessControlPolicy, cls).__new__(
             cls, methods, maxAge, allowOrigin, allowCredentials)
+
+    def forResource(self, resource):
+        if self.methods is INFERRED:
+            try:
+                methods = tuple(compat.networkString(method)
+                                for method in resource.allowedMethods)
+            except AttributeError:
+                raise ValueError('Resource {!r} must have an allowedMethods'
+                                 ' attribute when used with an INFERRED'
+                                 ' AccessControlPolicy')
+            else:
+                return self._replace(methods=methods)
+        else:
+            return self
 
     def apply(self, request):
         origin = request.getHeader(b'origin')
@@ -92,11 +168,40 @@ class AccessControlPolicy(namedtuple('AccessControlPolicy',
 
 
 class HeaderPolicyApplyingResource(resource.Resource):
+    policies = None
 
-    def __init__(self, policies):
-        self.policies = policies
+    def __init__(self, policies=None):
+        if policies is None:
+            policies = self.policies
+
+        if not isinstance(policies, compat.Mapping):
+            raise ValueError("policies must be a mapping of bytes"
+                             " method names to sequence of policies.")
+
+        allowedMethods = getattr(self, 'allowedMethods', None)
+        if not allowedMethods:
+            raise ValueError("instance must have allowedMethods")
+
+        required = set(compat.networkString(method)
+                       for method in allowedMethods)
+        available = six.viewkeys(policies)
+        missing = required - available
+
+        if missing:
+            missing = {compat.stringFromNetwork(method)
+                       for method in missing}
+            raise ValueError("missing methods: {}".format(missing))
+
+        # adapt any policies we have to our resource
+        self._actingPolicies = {method: tuple(p.forResource(self)
+                                              for p in methodPolicies)
+                                for method, methodPolicies in policies.items()}
 
     def applyPolicies(self, request):
-        for policy in self.policies:
+        '''
+        Apply relevant header policies to request.  Call me where
+        appropriate in your render_* methods.
+        '''
+        for policy in self._actingPolicies[request.method]:
             request = policy.apply(request)
         return request

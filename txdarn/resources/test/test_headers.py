@@ -1,8 +1,49 @@
 from functools import partial
 
 from twisted.trial import unittest
+from twisted.web.resource import Resource
 from twisted.web.test import requesthelper
+
+from zope.interface import implementer
+from zope.interface.verify import verifyObject
+
 from .. import headers as H
+
+
+class ImmutableDictTestCase(unittest.SynchronousTestCase):
+
+    def setUp(self):
+        self.key = 'foo'
+        self.value = 2
+        self.dictionary = H.ImmutableDict({self.key: self.value})
+
+    def test_init_mapping(self):
+        self.assertEqual(self.dictionary,
+                         H.ImmutableDict({self.key: self.value}))
+
+    def test_init_iterable(self):
+        self.assertEqual(self.dictionary,
+                         H.ImmutableDict([(self.key, self.value)]))
+
+    def test_init_kwarg(self):
+        self.assertEqual(self.dictionary,
+                         H.ImmutableDict(**{self.key: self.value}))
+
+    def test_getitem(self):
+        self.assertIs(self.dictionary[self.key], self.value)
+
+        with self.assertRaises(KeyError):
+            self.dictionary['c']
+
+    def test_iter(self):
+        self.assertEqual([self.key],
+                         list(iter(self.dictionary)))
+
+    def test_len(self):
+        self.assertEqual(1, len(self.dictionary))
+
+    def test_repr(self):
+        repr(H.ImmutableDict(a=1))
 
 
 class PolicyTestCase(unittest.SynchronousTestCase):
@@ -12,6 +53,13 @@ class PolicyTestCase(unittest.SynchronousTestCase):
 
 
 class CachePolicyTestCase(PolicyTestCase):
+
+    def test_interface(self):
+        '''
+        CachePolicy instances provide IHeaderPolicy
+        '''
+        self.assertTrue(verifyObject(H.IHeaderPolicy,
+                                     H.CachePolicy(b'', None)))
 
     def test_cacheableApply(self):
         '''
@@ -53,12 +101,22 @@ class CachePolicyTestCase(PolicyTestCase):
         self.assertEqual(self.request.outgoingHeaders, expectedHeaders)
 
 
+class GETPOSTResource(object):
+    allowedMethods = ('GET', 'POST')
+
+
 class AccessControlPolicyTestCase(PolicyTestCase):
 
     def setUp(self):
         super(AccessControlPolicyTestCase, self).setUp()
         self.dummyPolicy = H.AccessControlPolicy(methods=(),
                                                  maxAge=None)
+
+    def test_interface(self):
+        '''
+        AccessControlPolicy instances provide IHeaderPolicy
+        '''
+        self.assertTrue(verifyObject(H.IHeaderPolicy, self.dummyPolicy))
 
     def test_allowOrigin(self):
         '''
@@ -104,3 +162,86 @@ class AccessControlPolicyTestCase(PolicyTestCase):
 
         policy.apply(self.request)
         self.assertEqual(self.request.outgoingHeaders, expectedHeaders)
+
+    def test_forResource_inference(self):
+        infers = H.AccessControlPolicy(methods=H.INFERRED,
+                                       maxAge=1234)
+        inferred = infers.forResource(GETPOSTResource())
+        self.assertEqual(inferred.methods, (b'GET', b'POST'))
+
+    def test_forResource_noAllowedMethods(self):
+        infers = H.AccessControlPolicy(methods=H.INFERRED,
+                                       maxAge=1234)
+        with self.assertRaises(ValueError):
+            infers.forResource(Resource())
+
+    def test_forResource_noInference(self):
+        doesNotInfer = H.AccessControlPolicy(methods=(b'PATCH'),
+                                             maxAge=1234)
+        theSameInstance = doesNotInfer.forResource(GETPOSTResource())
+
+        self.assertEqual(theSameInstance, doesNotInfer)
+
+
+class RecordsPolicy(object):
+    sawResource = False
+    SAW_RESOURCE_HEADER = b'X-Saw-Resource'
+
+
+@implementer(H.IHeaderPolicy)
+class FakePolicy(object):
+
+    def __init__(self, recorder):
+        self._recorder = recorder
+
+    def forResource(self, resource):
+        self._recorder.sawResource = True
+        return self
+
+    def apply(self, request):
+        if self._recorder.sawResource:
+            request.setHeader(self._recorder.SAW_RESOURCE_HEADER, b'1')
+        return request
+
+
+class HeaderPolicyApplyingResourceTestCase(PolicyTestCase):
+
+    def setUp(self):
+        super(HeaderPolicyApplyingResourceTestCase, self).setUp()
+        self.recorder = RecordsPolicy()
+
+        class TestResource(H.HeaderPolicyApplyingResource):
+            allowedMethods = ('GET',)
+            policies = H.ImmutableDict({b'GET': (FakePolicy(self.recorder),)})
+
+        self.TestResource = TestResource
+
+    def test_applyPolicies(self):
+        resource = self.TestResource()
+        resource.applyPolicies(self.request)
+
+        headerSet = self.request.outgoingHeaders.get(
+            self.recorder.SAW_RESOURCE_HEADER.lower())
+
+        self.assertTrue(headerSet)
+
+    def test_applyPolicies_overridenDefaults(self):
+        resource = self.TestResource(policies={b'GET': ()})
+        resource.applyPolicies(self.request)
+
+        headerSet = self.request.outgoingHeaders.get(
+            self.recorder.SAW_RESOURCE_HEADER.lower())
+
+        self.assertFalse(headerSet)
+
+    def test_init_failsWithInvalidPolicy(self):
+        with self.assertRaises(ValueError):
+            H.HeaderPolicyApplyingResource(policies='blah')
+
+    def test_init_failsWithoutAllowedMethods(self):
+        with self.assertRaises(ValueError):
+            H.HeaderPolicyApplyingResource(policies={b'GET': ()})
+
+    def test_init_failsWithIncompletePolicy(self):
+        with self.assertRaises(ValueError):
+            self.TestResource(policies={b'POST': ()})

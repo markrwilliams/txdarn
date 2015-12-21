@@ -3,6 +3,7 @@ import re
 from twisted.internet import defer
 from twisted.web import template
 from twisted.trial import unittest
+from twisted.web import http
 from twisted.web.test import requesthelper
 
 from txdarn import encoding
@@ -73,6 +74,21 @@ class IFrameResourceTestCase(unittest.SynchronousTestCase):
         with self.assertRaises(RuntimeError):
             S.IFrameResource(SOCKJS_URL_BYTES, _render=badRender)
 
+    def test_get_cached(self):
+        iframe = S.IFrameResource(SOCKJS_URL_BYTES)
+
+        request = requesthelper.DummyRequest([b'ignored'])
+        request.method = b'GET'
+
+        def setETag(request):
+            return http.CACHED
+
+        request.setETag = setETag
+
+        request.requestHeaders.addRawHeader(b'if-none-match',
+                                            iframe.etag)
+        self.assertFalse(iframe.render(request))
+
     @eliot.testing.capture_logging(test_templateError,
                                    exceptionType=RenderingError)
     def assertFailureLogged(self, logger, exceptionType):
@@ -81,11 +97,10 @@ class IFrameResourceTestCase(unittest.SynchronousTestCase):
 
 
 class OptionsSubResourceTestCaseMixin:
-    resourceClass = S.OptionsSubResource
 
     def test_options(self):
         request = requesthelper.DummyRequest([b'ignored'])
-        request.method = 'OPTIONS'
+        request.method = b'OPTIONS'
 
         optionsResource = self.resourceClass()
 
