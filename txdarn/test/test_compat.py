@@ -36,7 +36,7 @@ class TestCompat(unittest.SynchronousTestCase):
         with self.assertRaises(TypeError):
             C.networkString(u"i fail because i'm unicode")
 
-        with self.assertRaises(UnicodeError):
+        with self.assertRaises(UnicodeDecodeError):
             C.networkString(b"\xff fails because it's not ascii")
 
     def test_stringFromNetwork(self):
@@ -53,5 +53,5 @@ class TestCompat(unittest.SynchronousTestCase):
         with self.assertRaises(TypeError):
             C.stringFromNetwork(u"i fail because i'm unicode")
 
-        with self.assertRaises(TypeError):
+        with self.assertRaises(UnicodeDecodeError):
             C.stringFromNetwork("\xff fails because it's not ascii")

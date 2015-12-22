@@ -27,6 +27,15 @@ class ImmutableDict(compat.Mapping):
         className = self.__class__.__name__
         return '{}({!r})'.format(className, self._dict)
 
+    if not six.PY3:
+        # a bummer of a hack; subtraction between a set and a KeysView
+        # is not commutative in python 2.  this fails with a TypeError:
+        # set('a') - KeysView({'a': 1})
+        # while this does not:
+        # KeysView('a') - {'a': 1}
+        def viewkeys(self):
+            return self._dict.viewkeys()
+
 
 PUBLIC = b'public'
 NO_CACHE = b'no-cache'          # TODO: this should be a function,
