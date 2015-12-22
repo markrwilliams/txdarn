@@ -19,6 +19,26 @@ class TestCompat(unittest.SynchronousTestCase):
         self.assertEqual(C.asJSON({'a': [1]}),
                          b'{"a": [1]}')
 
+    def test_asJSON_withMoreArguments(self):
+        self.assertEqual(C.asJSON({"b": [0], "a": [1]},
+                                  sort_keys=True),
+                         b'{"a": [1], "b": [0]}')
+
+    def test_fromJSON(self):
+        self.assertEqual(C.fromJSON(b'{"a": [1]}'),
+                         {"a": [1]})
+
+    def test_fromJSON_withMoreArguments(self):
+        called = []
+
+        def objectHook(passThrough):
+            called.append(1)
+            return passThrough
+
+        self.assertEqual(C.fromJSON(b'{"a": [1]}', object_hook=objectHook),
+                         {"a": [1]})
+        self.assertTrue(called)
+
     def test_intToBytes(self):
         self.assertEqual(C.intToBytes(1024), b'1024')
 

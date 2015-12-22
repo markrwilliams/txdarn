@@ -4,12 +4,17 @@ from .encoding import ENCODING
 
 
 if six.PY3:
-    def asJSON(obj):
-        return json.dumps(obj).encode(ENCODING)
-else:
-    def asJSON(obj):
-        return json.dumps(obj)
+    def asJSON(*args, **kwargs):
+        return json.dumps(*args, **kwargs).encode(ENCODING)
 
+    def fromJSON(s, *args, **kwargs):
+        return json.loads(s.decode(ENCODING), *args, **kwargs)
+else:
+    def asJSON(*args, **kwargs):
+        return json.dumps(*args, **kwargs)
+
+    def fromJSON(*args, **kwargs):
+        return json.loads(*args, **kwargs)
 
 if six.PY3:
     # shamelessly lifted from t.p.compat
