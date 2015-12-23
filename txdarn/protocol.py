@@ -292,3 +292,49 @@ class SockJSProtocolFactory(WrappingFactory):
     def buildProtocol(self, addr):
         return self.protocol(self, self.wrappedFactory.buildProtocol(addr),
                              self.sockJSMachine)
+
+
+class RequestWrapperProtocol(ProtocolWrapper):
+    """A protocol wrapper that uses an http.Request object as its
+    transport.
+
+    """
+    request = None
+
+    def makeConnection(self, transport):
+        name = self.__class__.__name__
+        raise RuntimeError(
+            "Do not use {name}.makeConnection;"
+            " instead use {name}.makeConnectionFromRequest".format(name=name))
+
+    def makeConnectionFromRequest(self, request):
+        self.request = request
+        ProtocolWrapper.makeConnection(self, request.transport)
+
+    def write(self, data):
+        self.request.write(data)
+
+    def writeSequence(self, data):
+        for datum in data:
+            self.request.write(datum)
+
+    def loseConnection(self):
+        self.request.finish()
+
+    def registerProducer(self, producer, streaming):
+        self.request.registerProducer(producer, streaming)
+
+    def unregisterProducer(self):
+        self.request.unregisterProducer()
+
+    def connectionLost(self, reason):
+        self.request.connectionLost(reason)
+        ProtocolWrapper.connectionLost(self, reason)
+
+
+class RequestWrapperFactory(WrappingFactory):
+    """A factory that provides a protocol that proxies through to a
+    request object.
+
+    """
+    protocol = RequestWrapperProtocol

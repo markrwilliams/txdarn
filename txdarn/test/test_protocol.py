@@ -1,10 +1,14 @@
 import json
 
 from twisted.trial import unittest
-from twisted.internet.protocol import Protocol, Factory
+from twisted.internet.defer import Deferred
+from twisted.internet.protocol import Protocol, Factory, connectionDone
 from twisted.test.proto_helpers import StringTransport
 from twisted.internet.task import Clock
 from twisted.internet.address import IPv4Address
+# TODO: don't use twisted's private test APIs
+from twisted.web.test.requesthelper import DummyRequest
+from twisted.test.test_internet import DummyProducer
 from .. import protocol as P
 
 
@@ -276,3 +280,121 @@ class SockJSProtocolTestCase(unittest.TestCase):
         self.protocol.loseConnection()
         expectedProtocolTrace = b''.join([b'o', b'c[3000,"Go away!"]'])
         self.assertEqual(self.transport.value(), expectedProtocolTrace)
+
+
+class RequestWrapperProtocolTestCase(unittest.TestCase):
+
+    def setUp(self):
+        self.transport = StringTransport()
+        self.request = DummyRequest([b'ignored'])
+        self.request.transport = self.transport
+
+        wrappedFactory = Factory.forProtocol(EchoProtocol)
+        self.factory = P.RequestWrapperFactory(wrappedFactory)
+
+        self.protocol = self.factory.buildProtocol(self.request.getHost())
+        self.protocol.makeConnectionFromRequest(self.request)
+
+    def test_makeConnection_forbidden(self):
+        '''
+        RequestWrapperProtocol.makeConnection raises a RuntimeError.
+        '''
+        protocol = self.factory.buildProtocol(self.request.getHost())
+
+        with self.assertRaises(RuntimeError):
+            protocol.makeConnection(self.transport)
+
+    def test_write(self):
+        ''' RequestWrapperProtocol.write writes data to the request, not the
+        transport.
+
+        '''
+        self.protocol.dataReceived(b'something')
+        self.assertEqual(self.request.written, [b'something'])
+        self.assertFalse(self.transport.value())
+
+    def test_writeSequence(self):
+        '''RequestWrapperProtocol.writeSequence also writes data to the
+        request, not the transport.
+
+        '''
+        self.protocol.dataReceived([b'something', b'else'])
+        self.assertEqual(self.request.written, [b'something', b'else'])
+        self.assertFalse(self.transport.value())
+
+    def test_registerProducer_and_unregisterProducer(self):
+        '''RequestWrapperProtocol.registerProducer registers the producer with
+        the request, not the transport, while unregisterProducer
+        removes it from the request.
+
+        '''
+        # DummyRequest.registerProducer will loop infinitely!
+        def registerProducer(self, producer, s):
+            self.producer = producer
+            self.producerIsStreaming = s
+
+        self.request.registerProducer = registerProducer.__get__(self.request)
+
+        def unregisterProducer(self):
+            self.producer = None
+            self.producerIsStreaming = None
+
+        self.request.unregisterProducer = unregisterProducer.__get__(
+            self.request)
+
+        producer = DummyProducer()
+
+        self.protocol.registerProducer(producer, True)
+
+        self.assertIs(self.request.producer, producer)
+        self.assertTrue(self.request.producerIsStreaming)
+        self.assertIsNone(self.transport.producer)
+
+        self.protocol.unregisterProducer()
+
+        self.assertIsNone(self.request.producer)
+        self.assertIsNone(self.request.producerIsStreaming)
+        self.assertIsNone(self.transport.producer)
+
+    def test_loseConnection(self):
+        '''RequestWrapperProtocol.loseConnection finishes the request.'''
+
+        finishedDeferred = self.request.notifyFinish()
+
+        def assertFinished(ignored):
+            self.assertEqual(self.request.finished, 1)
+            # DummyRequest doesn't call its transport's loseConnection
+            self.assertFalse(self.transport.disconnecting)
+
+        finishedDeferred.addCallback(assertFinished)
+
+        self.protocol.dataReceived([b'about to close!'])
+        self.protocol.loseConnection()
+
+        self.assertEqual(self.request.written, [b'about to close!'])
+
+        return finishedDeferred
+
+    def test_connectionLost(self):
+        '''RequestWrapperProtocol.connectionLost loses the request's
+        connection.
+
+        '''
+        # DummyRequest doesn't implement this method, so hack
+        # something together here.
+
+        connectionLostDeferred = Deferred()
+
+        def connectionLost(reason):
+            connectionLostDeferred.errback(reason)
+
+        self.request.connectionLost = connectionLost
+
+        def assertConnectionLost(reason):
+            self.assertIs(reason, connectionDone)
+
+        connectionLostDeferred.addErrback(assertConnectionLost)
+
+        self.protocol.connectionLost(connectionDone)
+
+        return connectionLostDeferred
