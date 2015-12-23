@@ -1,4 +1,4 @@
-from txdarn.resources import support as S
+from txdarn import resources as R
 
 import klein
 
@@ -10,10 +10,10 @@ class TxDarn(object):
     def __init__(self, config):
         self.config = config
 
-        self._greeting = S.Greeting()
-        self._iframe = S.IFrameResource(
+        self._greeting = R.Greeting()
+        self._iframe = R.IFrameResource(
             sockJSURL=self.config['sockjs-url'])
-        self._info = S.InfoResource(
+        self._info = R.InfoResource(
             websocketsEnabled=self.config['websockets'])
 
     @app.route('/', strict_slashes=False)
