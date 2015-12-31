@@ -367,3 +367,18 @@ class InfoResource(HeaderPolicyApplyingResource):
                              'cookie_needed': self.cookiesNeeded,
                              'origins': self.allowedOrigins,
                              'entropy': self.calculateEntropy()})
+
+
+class XHRResource(object):
+    allowedMethods = ('POST', 'OPTIONS')
+
+    policies = ImmutableDict(
+        {b'POST': (DEFAULT_UNCACHEABLE_POLICY,
+                   DEFAULT_ACCESS_CONTROL_POLICY._replace(
+                       methods=(b'POST',))),
+         b'OPTIONS': (DEFAULT_CACHEABLE_POLICY,
+                      DEFAULT_ACCESS_CONTROL_POLICY)})
+
+    def render_OPTIONS(self, request):
+        self.applyPolicies(request)
+        return b''

@@ -2,13 +2,13 @@ import json
 
 from twisted.trial import unittest
 from twisted.internet.defer import Deferred
-from twisted.internet.protocol import Protocol, Factory, connectionDone
+from twisted.internet.protocol import Protocol, Factory
 from twisted.test.proto_helpers import StringTransport
 from twisted.internet.task import Clock
 from twisted.internet.address import IPv4Address
+from twisted.internet.error import ConnectionDone
 # TODO: don't use twisted's private test APIs
 from twisted.web.test.requesthelper import DummyRequest
-from twisted.test.test_internet import DummyProducer
 from .. import protocol as P
 
 
@@ -322,40 +322,6 @@ class RequestWrapperProtocolTestCase(unittest.TestCase):
         self.assertEqual(self.request.written, [b'something', b'else'])
         self.assertFalse(self.transport.value())
 
-    def test_registerProducer_and_unregisterProducer(self):
-        '''RequestWrapperProtocol.registerProducer registers the producer with
-        the request, not the transport, while unregisterProducer
-        removes it from the request.
-
-        '''
-        # DummyRequest.registerProducer will loop infinitely!
-        def registerProducer(self, producer, s):
-            self.producer = producer
-            self.producerIsStreaming = s
-
-        self.request.registerProducer = registerProducer.__get__(self.request)
-
-        def unregisterProducer(self):
-            self.producer = None
-            self.producerIsStreaming = None
-
-        self.request.unregisterProducer = unregisterProducer.__get__(
-            self.request)
-
-        producer = DummyProducer()
-
-        self.protocol.registerProducer(producer, True)
-
-        self.assertIs(self.request.producer, producer)
-        self.assertTrue(self.request.producerIsStreaming)
-        self.assertIsNone(self.transport.producer)
-
-        self.protocol.unregisterProducer()
-
-        self.assertIsNone(self.request.producer)
-        self.assertIsNone(self.request.producerIsStreaming)
-        self.assertIsNone(self.transport.producer)
-
     def test_loseConnection(self):
         '''RequestWrapperProtocol.loseConnection finishes the request.'''
 
@@ -376,25 +342,104 @@ class RequestWrapperProtocolTestCase(unittest.TestCase):
         return finishedDeferred
 
     def test_connectionLost(self):
-        '''RequestWrapperProtocol.connectionLost loses the request's
-        connection.
+        '''RequestWrapperProtocol.connectionLost calls through to the wrapped
+        protocol with Connection Done when there's no pending data.
 
         '''
-        # DummyRequest doesn't implement this method, so hack
-        # something together here.
 
-        connectionLostDeferred = Deferred()
+        ensureCalled = Deferred()
+
+        def trapConnectionDone(failure):
+            failure.trap(ConnectionDone)
+
+        ensureCalled.addErrback(trapConnectionDone)
 
         def connectionLost(reason):
-            connectionLostDeferred.errback(reason)
+            ensureCalled.errback(reason)
 
-        self.request.connectionLost = connectionLost
+        self.protocol.wrappedProtocol.connectionLost = connectionLost
+        self.protocol.connectionLost()
 
-        def assertConnectionLost(reason):
-            self.assertIs(reason, connectionDone)
+        return ensureCalled
 
-        connectionLostDeferred.addErrback(assertConnectionLost)
 
-        self.protocol.connectionLost(connectionDone)
+    def test_detachAndReattach(self):
+        '''RequestWrapperProtocol.detachFromRequest buffers subsequent writes,
+        which are flushed as soon as makeConnectionFromRequest is
+        called again.
 
-        return connectionLostDeferred
+        '''
+        self.protocol.detachFromRequest()
+        self.protocol.dataReceived(b'pending')
+        self.protocol.dataReceived(b'more pending')
+        self.assertFalse(self.request.written)
+
+        self.protocol.makeConnectionFromRequest(self.request)
+        self.assertEqual(self.request.written, [b'pending', b'more pending'])
+
+        self.protocol.dataReceived(b'written!')
+        self.assertEqual(self.request.written, [b'pending', b'more pending',
+                                                b'written!'])
+
+    def test_doubleMakeConnectionFromRequestClosesDuplicate(self):
+        '''A RequestWrapperProtocol that's attached to a request will close a
+        second request with an error message.
+
+        '''
+        secondRequest = DummyRequest([b'another'])
+        secondTransport = StringTransport()
+        secondRequest.transport = secondTransport
+
+        self.protocol.makeConnectionFromRequest(secondRequest)
+        self.assertEqual(secondRequest.written,
+                         [b'c[2010,"Another connection still open"]'])
+        # but we can still write to our first request
+        self.protocol.dataReceived(b'hello')
+        self.assertEqual(self.request.written, [b'hello'])
+
+    def test_loseConnection_whenDetached(self):
+        '''A RequestWrapperProtocol with pending data has loseConnection
+        called, its connectionLost method receives a SessionTimeout
+        failure.
+        '''
+        self.protocol.detachFromRequest()
+        self.protocol.dataReceived(b'pending')
+        self.protocol.loseConnection()
+
+        ensureCalled = Deferred()
+
+        def trapSessionTimeout(failure):
+            failure.trap(P.SessionTimeout)
+
+        ensureCalled.addErrback(trapSessionTimeout)
+
+        def connectionLost(reason):
+            ensureCalled.errback(reason)
+
+        self.protocol.wrappedProtocol.connectionLost = connectionLost
+        self.protocol.connectionLost()
+
+        return ensureCalled
+
+    def test_connectionLost_whenDetached(self):
+        '''A RequestWrapperProtocol with pending data has loseConnection
+        called, its connectionLost method receives a SessionTimeout
+        failure.
+        '''
+        self.protocol.detachFromRequest()
+        self.protocol.dataReceived(b'pending')
+
+        ensureCalled = Deferred()
+
+        def trapSessionTimeout(failure):
+            failure.trap(P.SessionTimeout)
+
+        ensureCalled.addErrback(trapSessionTimeout)
+
+        def connectionLost(reason):
+            ensureCalled.errback(reason)
+
+        self.protocol.wrappedProtocol.connectionLost = connectionLost
+        self.protocol.connectionLost()
+
+        return ensureCalled

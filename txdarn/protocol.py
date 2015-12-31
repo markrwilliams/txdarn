@@ -3,12 +3,31 @@ from automat import MethodicalMachine
 import eliot
 
 from twisted.python.constants import Values, ValueConstant
-from twisted.internet import reactor
+from twisted.internet import reactor, protocol, error
+from twisted.python import failure
 from twisted.protocols.policies import ProtocolWrapper, WrappingFactory
 
 import six.moves
 
 from txdarn.compat import asJSON, fromJSON
+
+
+def _collectReturnFalse(outputs):
+    '''An Automat collector function that consumes its output genexp and
+    returns False.
+
+    '''
+    list(outputs)
+    return False
+
+
+def _collectReturnTrue(outputs):
+    '''An Automat collector function that consumes its output genexp and
+    returns True.
+
+    '''
+    list(outputs)
+    return True
 
 
 def sockJSJSON(data, cls=None):
@@ -174,6 +193,10 @@ class SockJSProtocolMachine(object):
     def disconnect(self, reason=DISCONNECT.GO_AWAY):
         '''We're closing the connection because of reason.'''
 
+    @staticmethod
+    def closeFrame(reason):
+        return b'c' + sockJSJSON(reason.value)
+
     @_machine.output()
     def _writeCloseFrame(self, reason=DISCONNECT.GO_AWAY):
         '''Write a close frame with the given reason and schedule this
@@ -181,7 +204,7 @@ class SockJSProtocolMachine(object):
 
         '''
         self.heartbeater.stop()
-        self.transport.write(b'c' + sockJSJSON(reason.value))
+        self.transport.write(self.closeFrame(reason))
         self.transport.loseConnection()
         self.transport = None
 
@@ -211,7 +234,6 @@ loggingRepr = six.moves.reprlib.Repr().repr
 
 
 class SockJSProtocol(ProtocolWrapper):
-    # TODO: losing the connection
 
     def __init__(self, factory, wrappedProtocol, sockJSMachine):
         ProtocolWrapper.__init__(self, factory, wrappedProtocol)
@@ -294,12 +316,234 @@ class SockJSProtocolFactory(WrappingFactory):
                              self.sockJSMachine)
 
 
+class SessionTimeout(Exception):
+    """A session has timed out before all its data has been written."""
+
+
+class RequestSessionMachine(object):
+    _machine = MethodicalMachine()
+    request = None
+
+    @staticmethod
+    def graphviz(machine=_machine):  # pragma: no cover
+        return machine.graphviz()
+
+    def __init__(self, serverProtocol):
+        self.buffer = []
+        self.serverProtocol = serverProtocol
+
+    @_machine.state(initial=True)
+    def neverConnected(self):
+        '''We've never been connected to any request.'''
+
+    @_machine.state()
+    def connectedHaveTransport(self):
+        '''We're attached to a transport.'''
+
+    @_machine.state()
+    def connectedNoTransportEmptyBuffer(self):
+        '''We've been detached from our request and have no pending data to
+        write.
+
+        '''
+
+    @_machine.state()
+    def connectedNoTransportPending(self):
+        '''We've been detached from our request but there's pending data.'''
+
+    @_machine.state()
+    def loseConnectionEmptyBuffer(self):
+        '''We were told to lose the connection, and we have a request and thus
+    an empty buffer.
+
+        '''
+
+    @_machine.state()
+    def loseConnectionPending(self):
+        '''We were told to lose the connection, but we have data still in our
+        buffer.
+
+        '''
+
+    @_machine.state()
+    def disconnected(self):
+        '''The session bound to this protocol's lifetime has disappeared.'''
+
+    @_machine.input()
+    def attach(self, request):
+        '''Attach to the request, performing setup if necessary'''
+
+    @_machine.input()
+    def detach(self):
+        '''Detatch the current request'''
+
+    @_machine.input()
+    def write(self, data):
+        '''The protocol wants to write to the transport.'''
+
+    @_machine.input()
+    def dataReceived(self, data):
+        '''The client has written some data.'''
+
+    @_machine.input()
+    def loseConnection(self, reason=protocol.connectionDone):
+        '''Lose the request, if applicable'''
+
+    @_machine.input()
+    def connectionLost(self, reason=protocol.connectionDone):
+        '''The connection has been lost; clean up any request and clean up the
+        protocol'''
+
+    @_machine.output()
+    def _openRequest(self, request):
+        assert self.request is None
+        self.request = request
+
+    @_machine.output()
+    def _receive(self, data):
+        '''Pass data through to the wrapped protocol'''
+        self.serverProtocol.dataReceived(data)
+
+    @_machine.output()
+    def _bufferWrite(self, data):
+        '''Without a request, we have to buffer our writes'''
+        self.buffer.append(data)
+
+    @_machine.output()
+    def _flushBuffer(self, request):
+        '''Flush any pending data from the buffer to the request before we '''
+        assert request is self.request
+        for item in self.buffer:
+            request.write(item)
+        self.buffer = []
+
+    @_machine.output()
+    def _directWrite(self, data):
+        '''Skip our buffer'''
+        self.request.write(data)
+
+    @_machine.output()
+    def _closeRequest(self):
+        self.request.finish()
+        self.request = None
+
+    @_machine.output()
+    def _closeDuplicateRequest(self, request):
+        if request is not self.request:
+            message = SockJSProtocolMachine.closeFrame(DISCONNECT.STILL_OPEN)
+            request.write(message)
+            request.finish()
+
+    @_machine.output()
+    def _closeProtocol(self, reason=protocol.connectionDone):
+        self.serverProtocol.connectionLost(reason=protocol.connectionDone)
+        self.serverProtocol = None
+
+    @_machine.output()
+    def _timedOut(self, reason=protocol.connectionDone):
+        if isinstance(reason.value, (error.ConnectionDone,
+                                     error.ConnectionLost)):
+            reason = failure.Failure(SessionTimeout())
+        self.serverProtocol.connectionLost(reason=reason)
+        self.serverProtocol = None
+
+    neverConnected.upon(write,
+                        enter=connectedNoTransportPending,
+                        outputs=[_bufferWrite])
+    neverConnected.upon(dataReceived,
+                        enter=connectedNoTransportEmptyBuffer,
+                        outputs=[_receive])
+    neverConnected.upon(attach,
+                        enter=connectedHaveTransport,
+                        outputs=[_openRequest],
+                        collector=_collectReturnTrue)
+
+    connectedHaveTransport.upon(write,
+                                enter=connectedHaveTransport,
+                                outputs=[_directWrite])
+    connectedHaveTransport.upon(dataReceived,
+                                enter=connectedHaveTransport,
+                                outputs=[_receive])
+    connectedHaveTransport.upon(detach,
+                                enter=connectedNoTransportEmptyBuffer,
+                                outputs=[_closeRequest])
+    connectedHaveTransport.upon(attach,
+                                enter=connectedHaveTransport,
+                                outputs=[_closeDuplicateRequest],
+                                collector=_collectReturnFalse)
+
+    connectedNoTransportEmptyBuffer.upon(write,
+                                         enter=connectedNoTransportPending,
+                                         outputs=[_bufferWrite])
+    connectedNoTransportEmptyBuffer.upon(dataReceived,
+                                         enter=connectedNoTransportEmptyBuffer,
+                                         outputs=[_receive])
+    connectedNoTransportEmptyBuffer.upon(attach,
+                                         enter=connectedHaveTransport,
+                                         outputs=[_openRequest],
+                                         collector=_collectReturnTrue)
+    connectedNoTransportEmptyBuffer.upon(detach,
+                                         enter=connectedNoTransportEmptyBuffer,
+                                         outputs=[])
+    connectedNoTransportEmptyBuffer.upon(loseConnection,
+                                         enter=loseConnectionEmptyBuffer,
+                                         outputs=[])
+    connectedNoTransportEmptyBuffer.upon(connectionLost,
+                                         enter=disconnected,
+                                         outputs=[_closeProtocol])
+    # this is a separate state so we can't attach a request after
+    # we've called loseConnection
+    loseConnectionEmptyBuffer.upon(connectionLost,
+                                   enter=disconnected,
+                                   outputs=[_closeProtocol])
+    loseConnectionEmptyBuffer.upon(detach,
+                                   enter=loseConnectionEmptyBuffer,
+                                   outputs=[])
+
+    connectedNoTransportPending.upon(write,
+                                     enter=connectedNoTransportPending,
+                                     outputs=[_bufferWrite])
+    connectedNoTransportPending.upon(dataReceived,
+                                     enter=connectedNoTransportPending,
+                                     outputs=[_receive])
+    connectedNoTransportPending.upon(attach,
+                                     enter=connectedHaveTransport,
+                                     outputs=[_openRequest,
+                                              _flushBuffer],
+                                     collector=_collectReturnTrue)
+    connectedNoTransportPending.upon(detach,
+                                     enter=connectedNoTransportPending,
+                                     outputs=[])
+    connectedNoTransportPending.upon(loseConnection,
+                                     enter=loseConnectionPending,
+                                     outputs=[])
+    connectedNoTransportPending.upon(connectionLost,
+                                     enter=disconnected,
+                                     outputs=[_timedOut])
+    # this is a separate state so we can't attach a request after
+    # we've called loseConnection
+    loseConnectionPending.upon(connectionLost,
+                               enter=disconnected,
+                               outputs=[_timedOut])
+
+    loseConnectionPending.upon(detach,
+                               enter=loseConnectionPending,
+                               outputs=[])
+
+
 class RequestWrapperProtocol(ProtocolWrapper):
     """A protocol wrapper that uses an http.Request object as its
     transport.
 
+    The protocol cannot be started without a request, but it may outlive that
+    and many subsequent requests.
+
     """
     request = None
+
+    def __init__(self, *args, **kwargs):
+        ProtocolWrapper.__init__(self, *args, **kwargs)
+        self.sessionMachine = RequestSessionMachine(self.wrappedProtocol)
 
     def makeConnection(self, transport):
         name = self.__class__.__name__
@@ -308,28 +552,40 @@ class RequestWrapperProtocol(ProtocolWrapper):
             " instead use {name}.makeConnectionFromRequest".format(name=name))
 
     def makeConnectionFromRequest(self, request):
-        self.request = request
-        ProtocolWrapper.makeConnection(self, request.transport)
+        if self.sessionMachine.attach(request):
+            ProtocolWrapper.makeConnection(self, request.transport)
+
+    def detachFromRequest(self):
+        self.sessionMachine.detach()
 
     def write(self, data):
-        self.request.write(data)
+        self.sessionMachine.write(data)
 
     def writeSequence(self, data):
         for datum in data:
-            self.request.write(datum)
+            self.sessionMachine.write(datum)
+
+    def dataReceived(self, data):
+        self.sessionMachine.dataReceived(data)
 
     def loseConnection(self):
-        self.request.finish()
+        self.disconnecting = 1
+        self.sessionMachine.detach()
+        self.sessionMachine.loseConnection()
 
     def registerProducer(self, producer, streaming):
-        self.request.registerProducer(producer, streaming)
+        # TODO: implement this!
+        raise NotImplementedError
 
     def unregisterProducer(self):
-        self.request.unregisterProducer()
+        # TODO: implement this!
+        raise NotImplementedError
 
-    def connectionLost(self, reason):
-        self.request.connectionLost(reason)
-        ProtocolWrapper.connectionLost(self, reason)
+    def connectionLost(self, reason=protocol.connectionDone):
+        self.factory.unregisterProtocol(self)
+        self.sessionMachine.detach()
+        self.sessionMachine.connectionLost(reason)
+        self.sessionMachine = None
 
 
 class RequestWrapperFactory(WrappingFactory):

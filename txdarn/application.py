@@ -15,6 +15,7 @@ class TxDarn(object):
             sockJSURL=self.config['sockjs-url'])
         self._info = R.InfoResource(
             websocketsEnabled=self.config['websockets'])
+        self._sessionManager = R.SessionManager()
 
     @app.route('/', strict_slashes=False)
     def greeting(self, request):
@@ -28,3 +29,7 @@ class TxDarn(object):
     @app.route('/info')
     def info(self, request):
         return self._info
+
+    # with app.subroute('/<server_id>/<session_id>') as sessionApp:
+    #     @sessionApp.route('/xhr')
+    #     def xhr(self, server_id, session_id):
