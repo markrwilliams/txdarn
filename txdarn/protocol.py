@@ -241,13 +241,11 @@ class SockJSProtocol(ProtocolWrapper):
 
     def connectionMade(self):
         action_type = '{}.dataReceived'.format(self.__class__.__name__)
-        try:
-            with eliot.start_action(action_type=action_type):
-                self.sockJSMachine.connect(self.transport)
-        except ValueError:
-            pass
-        else:
-            self.wrappedProtocol.connectionMade()
+        # don't catch any exception here - we want to stop
+        # ProtocolWrapper.makeConnection from calling
+        # self.wrappedProtocol.makeConnection
+        with eliot.start_action(action_type=action_type):
+            self.sockJSMachine.connect(self.transport)
 
     def dataReceived(self, data):
         action_type = '{}.dataReceived'.format(self.__class__.__name__)
@@ -481,7 +479,7 @@ class RequestSessionMachine(object):
     connectedNoTransportEmptyBuffer.upon(attach,
                                          enter=connectedHaveTransport,
                                          outputs=[_openRequest],
-                                         collector=_collectReturnTrue)
+                                         collector=_collectReturnFalse)
     connectedNoTransportEmptyBuffer.upon(detach,
                                          enter=connectedNoTransportEmptyBuffer,
                                          outputs=[])
@@ -510,7 +508,7 @@ class RequestSessionMachine(object):
                                      enter=connectedHaveTransport,
                                      outputs=[_openRequest,
                                               _flushBuffer],
-                                     collector=_collectReturnTrue)
+                                     collector=_collectReturnFalse)
     connectedNoTransportPending.upon(detach,
                                      enter=connectedNoTransportPending,
                                      outputs=[])
@@ -552,6 +550,8 @@ class RequestWrapperProtocol(ProtocolWrapper):
             " instead use {name}.makeConnectionFromRequest".format(name=name))
 
     def makeConnectionFromRequest(self, request):
+        # attach should only return true if this is the first request
+        # we've seen.
         if self.sessionMachine.attach(request):
             ProtocolWrapper.makeConnection(self, request.transport)
 

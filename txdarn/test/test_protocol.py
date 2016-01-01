@@ -245,6 +245,12 @@ class SockJSProtocolStateMachineTestCase(unittest.TestCase):
 
 
 class EchoProtocol(Protocol):
+    connectionMadeCalls = 0
+
+    def connectionMade(self):
+        self.connectionMadeCalls += 1
+        if self.connectionMadeCalls > 1:
+            assert False, "connectionMade must only be called once"
 
     def dataReceived(self, data):
         if isinstance(data, list):
@@ -361,7 +367,6 @@ class RequestWrapperProtocolTestCase(unittest.TestCase):
         self.protocol.connectionLost()
 
         return ensureCalled
-
 
     def test_detachAndReattach(self):
         '''RequestWrapperProtocol.detachFromRequest buffers subsequent writes,
