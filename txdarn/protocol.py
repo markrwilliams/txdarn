@@ -45,10 +45,6 @@ class HeartbeatClock(object):
     writeHeartbeat = None
     pendingHeartbeat = None
 
-    @staticmethod
-    def graphviz(machine=_machine):  # pragma: no cover
-        return machine.graphviz()
-
     def __init__(self, writeHeartbeat=None, period=25.0, clock=reactor):
         self.writeHeartbeat = writeHeartbeat
         self.period = period
@@ -122,10 +118,6 @@ class HeartbeatClock(object):
 class SockJSProtocolMachine(object):
     _machine = MethodicalMachine()
     transport = None
-
-    @staticmethod
-    def graphviz(machine=_machine):  # pragma: no cover
-        return machine.graphviz()
 
     def __init__(self, heartbeater, jsonEncoder=None, jsonDecoder=None):
         self.heartbeater = heartbeater
@@ -321,10 +313,6 @@ class SessionTimeout(Exception):
 class RequestSessionMachine(object):
     _machine = MethodicalMachine()
     request = None
-
-    @staticmethod
-    def graphviz(machine=_machine):  # pragma: no cover
-        return machine.graphviz()
 
     def __init__(self, serverProtocol):
         self.buffer = []
