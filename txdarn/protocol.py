@@ -1,3 +1,5 @@
+from collections import namedtuple
+
 from automat import MethodicalMachine
 
 import eliot
@@ -296,12 +298,17 @@ class SockJSProtocolFactory(WrappingFactory):
                  jsonEncoder=None, jsonDecoder=None,
                  heartbeatPeriod=25.0, clock=reactor):
         WrappingFactory.__init__(self, wrappedProtocol)
-
-        heartbeater = HeartbeatClock(period=heartbeatPeriod, clock=clock)
-        self.sockJSMachine = SockJSProtocolMachine.withHeartbeater(
-            heartbeater, jsonEncoder, jsonDecoder)
+        self.jsonEncoder = jsonEncoder
+        self.jsonDecoder = jsonDecoder
+        self.heartbeatPeriod = heartbeatPeriod
+        self.clock = clock
 
     def buildProtocol(self, addr):
+        heartbeater = HeartbeatClock(period=self.heartbeatPeriod,
+                                     clock=self.clock)
+        self.sockJSMachine = SockJSProtocolMachine.withHeartbeater(
+            heartbeater, self.jsonEncoder, self.jsonDecoder)
+
         return self.protocol(self, self.wrappedFactory.buildProtocol(addr),
                              self.sockJSMachine)
 
@@ -582,3 +589,75 @@ class RequestWrapperFactory(WrappingFactory):
 
     """
     protocol = RequestWrapperProtocol
+
+
+class TimeoutClock(object):
+    _machine = MethodicalMachine()
+    timeout = None
+
+    def __init__(self, terminateSession, length=5.0, clock=reactor):
+        self._cbTerminateSession = terminateSession
+        self.length = length
+        self.clock = clock
+
+    @_machine.state(initial=True)
+    def unscheduled(self):
+        '''This timeout clock is attached to a session, but it is not
+        ticking.
+
+        '''
+
+    @_machine.state()
+    def scheduled(self):
+        '''This timeout clock is attached to a session and ticking down.'''
+
+    @_machine.state()
+    def stopped(self):
+        '''This timeout clock is permanently stopped, because the session
+        expired.
+
+        '''
+
+    @_machine.input()
+    def start(self):
+        '''Start the countdown clock.'''
+
+    @_machine.input()
+    def reset(self):
+        '''Reset the timeout countdown, cancelling the previous one.  This
+        does not start the clock.
+
+        '''
+
+    @_machine.input()
+    def expire(self):
+        '''The timeout has expired; time to terminate the session.'''
+
+    @_machine.output()
+    def _startTheClock(self):
+        '''Schedule this session's timeout.'''
+        self.timeout = self.clock.callLater(self.length,
+                                            self.expire)
+
+    @_machine.output()
+    def _stopTheClock(self):
+        '''Stop our timeout clock.'''
+        self.timeout.cancel()
+
+    @_machine.output()
+    def _resetTheClock(self):
+        '''Reset our timeout to None.'''
+        self.timeout = None
+
+    @_machine.output()
+    def _terminateSession(self):
+        '''Call our session termination callback.'''
+        self._cbTerminateSession()
+
+    unscheduled.upon(start, enter=scheduled, outputs=[_startTheClock])
+    unscheduled.upon(expire, enter=stopped, outputs=[])
+
+    scheduled.upon(reset, enter=unscheduled, outputs=[_stopTheClock,
+                                                      _resetTheClock])
+    scheduled.upon(expire, enter=stopped, outputs=[_resetTheClock,
+                                                   _terminateSession])

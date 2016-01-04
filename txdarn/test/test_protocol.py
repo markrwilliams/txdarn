@@ -24,19 +24,21 @@ class HeartbeatClockTestCase(unittest.TestCase):
     def setUp(self):
         self.clock = Clock()
         self.period = 25.0
-        self.heartbeats = []
+        self.heartbeats = 0
 
         def fakeHeartbeat():
-            self.heartbeats.append(1)
+            self.heartbeats += 1
 
         self.heartbeater = P.HeartbeatClock(fakeHeartbeat,
                                             period=self.period,
                                             clock=self.clock)
 
     def test_neverScheduled(self):
-        '''Heartbeats are not scheduled before the first schedule(), and are
+        '''Heartbeats are not scheduled before their first schedule(), and are
         not scheduled if we immediately stop() the HeartbeatClock.  A
-        stopped HeartbeatClock can never schedule any other heartbeats.
+        stopped HeartbeatClock can never schedule any other
+        heartbeats.
+
         '''
 
         self.assertFalse(self.clock.getDelayedCalls())
@@ -56,8 +58,7 @@ class HeartbeatClockTestCase(unittest.TestCase):
         self.assertEqual(self.clock.getDelayedCalls(), [pendingBeat])
 
         self.clock.advance(self.period * 2)
-        self.assertEqual(len(self.heartbeats), 1)
-        self.assertFalse(pendingBeat.active())
+        self.assertEqual(self.heartbeats, 1)
 
         rescheduledPendingBeat = self.heartbeater.pendingHeartbeat
         self.assertEqual(self.clock.getDelayedCalls(),
@@ -70,12 +71,14 @@ class HeartbeatClockTestCase(unittest.TestCase):
         '''
         self.heartbeater.schedule()
         pendingBeat = self.heartbeater.pendingHeartbeat
+        self.assertEqual(self.clock.getDelayedCalls(), [pendingBeat])
 
         self.heartbeater.schedule()
+
         self.assertFalse(self.heartbeats)
-        self.assertFalse(pendingBeat.active())
 
         rescheduledPendingBeat = self.heartbeater.pendingHeartbeat
+        self.assertIsNot(pendingBeat, rescheduledPendingBeat)
         self.assertEqual(self.clock.getDelayedCalls(),
                          [rescheduledPendingBeat])
 
@@ -83,10 +86,10 @@ class HeartbeatClockTestCase(unittest.TestCase):
         '''A stop() call removes any pending heartbeats.'''
         self.heartbeater.schedule()
         pendingBeat = self.heartbeater.pendingHeartbeat
+        self.assertEqual(self.clock.getDelayedCalls(), [pendingBeat])
 
         self.heartbeater.stop()
         self.assertFalse(self.heartbeats)
-        self.assertFalse(pendingBeat.active())
         self.assertFalse(self.clock.getDelayedCalls())
 
 
@@ -448,3 +451,72 @@ class RequestWrapperProtocolTestCase(unittest.TestCase):
         self.protocol.connectionLost()
 
         return ensureCalled
+
+
+class TimeoutClockTestCase(unittest.TestCase):
+
+    def setUp(self):
+        self.clock = Clock()
+        self.length = 5.0
+        self.timedOut = False
+
+        def fakeTerminateSession():
+            self.timedOut = True
+
+        self.timeout = P.TimeoutClock(fakeTerminateSession,
+                                      length=self.length,
+                                      clock=self.clock)
+
+    def test_neverScheduled(self):
+        '''Timeouts are not scheduled before their first start(), and are not
+        scheduled if we immediately expire() the TimeoutClock.  A stopped
+        TimeoutClock can never schedule another timeout.
+
+        '''
+        self.assertFalse(self.clock.getDelayedCalls())
+        self.timeout.expire()
+        self.assertFalse(self.clock.getDelayedCalls())
+
+        with self.assertRaises(KeyError):
+            self.timeout.reset()
+
+        self.assertFalse(self.clock.getDelayedCalls())
+
+    def test_start(self):
+        '''A timeout expires a connection if not interrupted and then
+        stops.
+
+        '''
+
+        self.timeout.start()
+
+        pendingExpiration = self.timeout.timeout
+        self.assertFalse(self.timedOut)
+        self.assertEqual(self.clock.getDelayedCalls(), [pendingExpiration])
+
+        self.clock.advance(self.length * 2)
+        self.assertTrue(self.timedOut)
+
+        self.assertIsNone(self.timeout.timeout)
+
+        with self.assertRaises(KeyError):
+            self.timeout.start()
+
+        with self.assertRaises(KeyError):
+            self.timeout.reset()
+
+    def test_reset_interrupts(self):
+        '''A reset() call will remove the pending timeout and reschedule it
+        for later.
+
+        '''
+        self.timeout.start()
+
+        pendingExpiration = self.timeout.timeout
+        self.assertEqual(self.clock.getDelayedCalls(), [pendingExpiration])
+
+        self.timeout.reset()
+
+        resetPendingExecution = self.timeout.timeout
+        self.assertIsNot(pendingExpiration, resetPendingExecution)
+        self.assertEqual(self.clock.getDelayedCalls(), [])
