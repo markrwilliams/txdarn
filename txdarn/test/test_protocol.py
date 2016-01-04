@@ -19,7 +19,7 @@ class sockJSJSONTestCase(unittest.SynchronousTestCase):
                          b'[3000,"Go away!"]')
 
 
-class HeartbeatClock(unittest.TestCase):
+class HeartbeatClockTestCase(unittest.TestCase):
 
     def setUp(self):
         self.clock = Clock()

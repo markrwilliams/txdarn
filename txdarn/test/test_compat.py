@@ -13,7 +13,7 @@ def skipIfVersion(test):
     return _decorator
 
 
-class TestCompat(unittest.SynchronousTestCase):
+class CompatTestCase(unittest.SynchronousTestCase):
 
     def test_asJSON(self):
         self.assertEqual(C.asJSON({'a': [1]}),
