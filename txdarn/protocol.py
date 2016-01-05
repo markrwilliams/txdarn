@@ -321,9 +321,10 @@ class RequestSessionMachine(object):
     _machine = MethodicalMachine()
     request = None
 
-    def __init__(self, serverProtocol):
+    def __init__(self, serverProtocol, completeConnection):
         self.buffer = []
         self.serverProtocol = serverProtocol
+        self._completeConnection = completeConnection
 
     @_machine.state(initial=True)
     def neverConnected(self):
@@ -364,7 +365,12 @@ class RequestSessionMachine(object):
 
     @_machine.input()
     def attach(self, request):
-        '''Attach to the request, performing setup if necessary'''
+        '''Attach to the request, performing setup if necessary.  The
+        user-visible return value of this input should be True if the
+        request attached and False if not, because an existing request
+        was already attached.
+
+        '''
 
     @_machine.input()
     def detach(self):
@@ -391,6 +397,10 @@ class RequestSessionMachine(object):
     def _openRequest(self, request):
         assert self.request is None
         self.request = request
+
+    @_machine.output()
+    def _completeConnectionWrapping(self, request):
+        self._completeConnection(request)
 
     @_machine.output()
     def _receive(self, data):
@@ -448,7 +458,8 @@ class RequestSessionMachine(object):
                         outputs=[_receive])
     neverConnected.upon(attach,
                         enter=connectedHaveTransport,
-                        outputs=[_openRequest],
+                        outputs=[_openRequest,
+                                 _completeConnectionWrapping],
                         collector=_collectReturnTrue)
 
     connectedHaveTransport.upon(write,
@@ -474,7 +485,7 @@ class RequestSessionMachine(object):
     connectedNoTransportEmptyBuffer.upon(attach,
                                          enter=connectedHaveTransport,
                                          outputs=[_openRequest],
-                                         collector=_collectReturnFalse)
+                                         collector=_collectReturnTrue)
     connectedNoTransportEmptyBuffer.upon(detach,
                                          enter=connectedNoTransportEmptyBuffer,
                                          outputs=[])
@@ -524,19 +535,23 @@ class RequestSessionMachine(object):
                                outputs=[])
 
 
-class RequestWrapperProtocol(ProtocolWrapper):
+class _RequestWrapperProtocol(ProtocolWrapper):
     """A protocol wrapper that uses an http.Request object as its
     transport.
 
     The protocol cannot be started without a request, but it may outlive that
     and many subsequent requests.
 
+    This is the base class for polling SockJS transports
+
     """
     request = None
 
     def __init__(self, *args, **kwargs):
         ProtocolWrapper.__init__(self, *args, **kwargs)
-        self.sessionMachine = RequestSessionMachine(self.wrappedProtocol)
+        self.sessionMachine = RequestSessionMachine(
+            self.wrappedProtocol,
+            completeConnection=self._completeConnectionWrapping)
 
     def makeConnection(self, transport):
         name = self.__class__.__name__
@@ -544,11 +559,11 @@ class RequestWrapperProtocol(ProtocolWrapper):
             "Do not use {name}.makeConnection;"
             " instead use {name}.makeConnectionFromRequest".format(name=name))
 
+    def _completeConnectionWrapping(self, request):
+        ProtocolWrapper.makeConnection(self, request.transport)
+
     def makeConnectionFromRequest(self, request):
-        # attach should only return true if this is the first request
-        # we've seen.
-        if self.sessionMachine.attach(request):
-            ProtocolWrapper.makeConnection(self, request.transport)
+        return self.sessionMachine.attach(request)
 
     def detachFromRequest(self):
         self.sessionMachine.detach()
@@ -581,14 +596,6 @@ class RequestWrapperProtocol(ProtocolWrapper):
         self.sessionMachine.detach()
         self.sessionMachine.connectionLost(reason)
         self.sessionMachine = None
-
-
-class RequestWrapperFactory(WrappingFactory):
-    """A factory that provides a protocol that proxies through to a
-    request object.
-
-    """
-    protocol = RequestWrapperProtocol
 
 
 class TimeoutClock(object):
@@ -636,8 +643,7 @@ class TimeoutClock(object):
     @_machine.output()
     def _startTheClock(self):
         '''Schedule this session's timeout.'''
-        self.timeout = self.clock.callLater(self.length,
-                                            self.expire)
+        self.timeout = self.clock.callLater(self.length, self.expire)
 
     @_machine.output()
     def _stopTheClock(self):

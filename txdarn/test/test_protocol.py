@@ -3,6 +3,7 @@ import json
 from twisted.trial import unittest
 from twisted.internet.defer import Deferred
 from twisted.internet.protocol import Protocol, Factory
+from twisted.protocols.policies import WrappingFactory
 from twisted.test.proto_helpers import StringTransport
 from twisted.internet.task import Clock
 from twisted.internet.address import IPv4Address
@@ -291,6 +292,13 @@ class SockJSProtocolTestCase(unittest.TestCase):
         self.assertEqual(self.transport.value(), expectedProtocolTrace)
 
 
+class TestFactoryForRequestWrapperProtocol(WrappingFactory):
+    '''
+    A factory for testing RequestWrapperProtocol
+    '''
+    protocol = P._RequestWrapperProtocol
+
+
 class RequestWrapperProtocolTestCase(unittest.TestCase):
 
     def setUp(self):
@@ -299,7 +307,7 @@ class RequestWrapperProtocolTestCase(unittest.TestCase):
         self.request.transport = self.transport
 
         wrappedFactory = Factory.forProtocol(EchoProtocol)
-        self.factory = P.RequestWrapperFactory(wrappedFactory)
+        self.factory = TestFactoryForRequestWrapperProtocol(wrappedFactory)
 
         self.protocol = self.factory.buildProtocol(self.request.getHost())
         self.protocol.makeConnectionFromRequest(self.request)
