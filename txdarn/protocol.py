@@ -213,8 +213,8 @@ class SockJSProtocolMachine(object):
     @_machine.output()
     def _stopHeartbeat(self):
         '''We lost our connection - stop our heartbeat.'''
-        self.heartbeat.stop()
-        self.heartbeat = None
+        self.heartbeater.stop()
+        self.heartbeater = None
 
     notYetConnected.upon(connect,
                          enter=connected,
@@ -236,6 +236,10 @@ class SockJSProtocolMachine(object):
     connected.upon(disconnect,
                    enter=disconnecting,
                    outputs=[_writeCloseFrame])
+
+    connected.upon(close,
+                   enter=disconnected,
+                   outputs=[_stopHeartbeat])
 
     disconnecting.upon(close,
                        enter=disconnected,
@@ -310,9 +314,8 @@ class SockJSProtocol(ProtocolWrapper):
             with eliot.start_action(action_type=action_type):
 
                 self.sockJSMachine.close()
-
         except Exception:
-            raise
+            pass
         else:
             self.wrappedProtocol.connectionLost(reason)
 
@@ -650,7 +653,7 @@ class TimeoutClock(object):
         self.terminated.callback(None)
 
     unscheduled.upon(start, enter=scheduled, outputs=[_startTheClock])
-    unscheduled.upon(reset, enter=stopped, outputs=[])
+    unscheduled.upon(reset, enter=unscheduled, outputs=[])
 
     scheduled.upon(reset, enter=unscheduled, outputs=[_stopTheClock,
                                                       _resetTheClock])
@@ -789,7 +792,11 @@ class XHRSession(_RequestSessionProtocol):
 
     def write(self, data):
         _RequestSessionProtocol.write(self, data)
-        self.detachFromRequest()
+        # TODO: too much protocol separation
+        if data == b'o':
+            reactor.callLater(0, self.detachFromRequest)
+        elif data != b'h':
+            self.detachFromRequest()
 
     def writeSequence(self, data):
         _RequestSessionProtocol.writeSequence(self, data)
