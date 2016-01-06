@@ -48,7 +48,7 @@ class HeartbeatClock(object):
     writeHeartbeat = None
     pendingHeartbeat = None
 
-    def __init__(self, writeHeartbeat=None, period=25.0, clock=reactor):
+    def __init__(self, writeHeartbeat=None, period=5.0, clock=reactor):
         self.writeHeartbeat = writeHeartbeat
         self.period = period
         self.clock = clock
@@ -143,6 +143,10 @@ class SockJSProtocolMachine(object):
         '''We have a connection!'''
 
     @_machine.state()
+    def disconnecting(self):
+        '''We've asked to be disconnected.'''
+
+    @_machine.state()
     def disconnected(self):
         '''We have been disconnected.'''
 
@@ -188,6 +192,10 @@ class SockJSProtocolMachine(object):
     def disconnect(self, reason=DISCONNECT.GO_AWAY):
         '''We're closing the connection because of reason.'''
 
+    @_machine.input()
+    def close(self):
+        '''Our connection has been closed'''
+
     @staticmethod
     def closeFrame(reason):
         return b'c' + sockJSJSON(reason.value)
@@ -198,10 +206,15 @@ class SockJSProtocolMachine(object):
         connection close.
 
         '''
-        self.heartbeater.stop()
         self.transport.write(self.closeFrame(reason))
         self.transport.loseConnection()
         self.transport = None
+
+    @_machine.output()
+    def _stopHeartbeat(self):
+        '''We lost our connection - stop our heartbeat.'''
+        self.heartbeat.stop()
+        self.heartbeat = None
 
     notYetConnected.upon(connect,
                          enter=connected,
@@ -221,8 +234,13 @@ class SockJSProtocolMachine(object):
                    enter=connected,
                    outputs=[_writeHeartbeatToTransport])
     connected.upon(disconnect,
-                   enter=disconnected,
+                   enter=disconnecting,
                    outputs=[_writeCloseFrame])
+
+    disconnecting.upon(close,
+                       enter=disconnected,
+                       outputs=[_stopHeartbeat])
+
 
 loggingRepr = six.moves.reprlib.Repr().repr
 
@@ -234,7 +252,7 @@ class SockJSProtocol(ProtocolWrapper):
         self.sockJSMachine = sockJSMachine
 
     def connectionMade(self):
-        action_type = '{}.dataReceived'.format(self.__class__.__name__)
+        action_type = '{}.connectionMade'.format(self.__class__.__name__)
         # don't catch any exception here - we want to stop
         # ProtocolWrapper.makeConnection from calling
         # self.wrappedProtocol.makeConnection
@@ -286,6 +304,18 @@ class SockJSProtocol(ProtocolWrapper):
         except Exception:
             pass
 
+    def connectionLost(self, reason=protocol.connectionDone):
+        try:
+            action_type = '{}.loseConnection'.format(self.__class__.__name__)
+            with eliot.start_action(action_type=action_type):
+
+                self.sockJSMachine.close()
+
+        except Exception:
+            raise
+        else:
+            self.wrappedProtocol.connectionLost(reason)
+
 
 class SockJSProtocolFactory(WrappingFactory):
     """Factory that wraps another factory to provide the SockJS protocol.
@@ -296,7 +326,7 @@ class SockJSProtocolFactory(WrappingFactory):
 
     def __init__(self, wrappedProtocol,
                  jsonEncoder=None, jsonDecoder=None,
-                 heartbeatPeriod=25.0, clock=reactor):
+                 heartbeatPeriod=5.0, clock=reactor):
         WrappingFactory.__init__(self, wrappedProtocol)
         self.jsonEncoder = jsonEncoder
         self.jsonDecoder = jsonDecoder
@@ -374,7 +404,7 @@ class RequestSessionMachine(object):
 
     @_machine.input()
     def detach(self):
-        '''Detatch the current request'''
+        '''Detach the current request'''
 
     @_machine.input()
     def write(self, data):
@@ -400,7 +430,7 @@ class RequestSessionMachine(object):
 
     @_machine.output()
     def _completeConnection(self, request):
-        self.connectionCompleted(request)
+        self.connectionCompleted.callback(request)
 
     @_machine.output()
     def _receive(self, data):
@@ -466,7 +496,7 @@ class RequestSessionMachine(object):
     neverConnected.upon(attach,
                         enter=connectedHaveTransport,
                         outputs=[_openRequest,
-                                 _connectionCompleted],
+                                 _completeConnection],
                         collector=_collectReturnTrue)
 
     connectedHaveTransport.upon(write,
@@ -549,7 +579,7 @@ class RequestSessionMachine(object):
 
 class TimeoutClock(object):
     _machine = MethodicalMachine()
-    timeout = None
+    terminated = None
 
     def __init__(self, length=5.0, clock=reactor):
         self.length = length
@@ -598,12 +628,14 @@ class TimeoutClock(object):
     @_machine.output()
     def _startTheClock(self):
         '''Schedule this session's timeout.'''
+        print("_startTheClock", self.length)
         self.timeout = self.clock.callLater(self.length, self.expire)
 
     @_machine.output()
     def _stopTheClock(self):
         '''Stop our timeout clock.'''
         self.timeout.cancel()
+        print("_stopTheClock")
 
     @_machine.output()
     def _resetTheClock(self):
@@ -613,10 +645,12 @@ class TimeoutClock(object):
     @_machine.output()
     def _terminateSession(self):
         '''Call our session termination callback.'''
+        print("_terminateSession")
+
         self.terminated.callback(None)
 
     unscheduled.upon(start, enter=scheduled, outputs=[_startTheClock])
-    unscheduled.upon(expire, enter=stopped, outputs=[])
+    unscheduled.upon(reset, enter=stopped, outputs=[])
 
     scheduled.upon(reset, enter=unscheduled, outputs=[_stopTheClock,
                                                       _resetTheClock])
@@ -639,6 +673,7 @@ class _RequestSessionProtocol(ProtocolWrapper):
 
     """
     request = None
+    attached = False
 
     def __init__(self, timeoutClock, *args, **kwargs):
         ProtocolWrapper.__init__(self, *args, **kwargs)
@@ -659,10 +694,14 @@ class _RequestSessionProtocol(ProtocolWrapper):
 
     def makeConnectionFromRequest(self, request):
         if self.sessionMachine.attach(request):
+            self.attached = True
+            print('attach')
             self.timeoutClock.reset()
 
     def detachFromRequest(self):
         self.sessionMachine.detach()
+        self.attached = False
+        print("detachFromRequest")
         self.timeoutClock.start()
 
     def write(self, data):
@@ -696,21 +735,44 @@ class _RequestSessionProtocol(ProtocolWrapper):
         self.sessionMachine = None
 
 
+class _RequestSessionFactory(WrappingFactory):
+    protocol = _RequestSessionProtocol
+
+    def buildProtocol(self, timeoutClock, addr):
+        return self.protocol(timeoutClock,
+                             self,
+                             self.wrappedFactory.buildProtocol(addr))
+
+
 class SessionHouse(object):
 
     def __init__(self, factory, timeout=5.0, timeoutFactory=TimeoutClock):
         self.factory = factory
-        self.timeout = timeout
+        self.timeout = 5.0
+        self.timeoutFactory = timeoutFactory
         self.sessions = {}
 
-    def makeSession(self, request):
+    def makeSession(self, sessionID, request):
         timeoutClock = self.timeoutFactory(self.timeout)
-        self.factory.buildProtocol(timeoutClock)
+        protocol = self.factory.buildProtocol(timeoutClock,
+                                              request.transport.getHost())
+        timeoutDeferred = timeoutClock.terminated
+
+        timeoutDeferred.addCallback(self._sessionTimedOut, sessionID)
+        timeoutDeferred.addErrback(eliot.writeFailure)
+
+        return protocol
+
+    def _sessionTimedOut(self, _, sessionID):
+        protocol = self.sessions.pop(sessionID)
+        assert not protocol.attached
+        protocol.connectionLost()
 
     def attachToSession(self, sessionID, request):
         session = self.sessions.get(sessionID)
         if not session:
-            session = self.sessions[sessionID] = self.makeSession(request)
+            session = self.sessions[sessionID] = self.makeSession(sessionID,
+                                                                  request)
         session.makeConnectionFromRequest(request)
 
     def writeToSession(self, sessionID, data):
@@ -723,13 +785,16 @@ class SessionHouse(object):
             return True
 
 
-class _RequestSessionFactory(WrappingFactory):
-    protocol = _RequestSessionProtocol
+class XHRSession(_RequestSessionProtocol):
 
-    def __init__(self, )
+    def write(self, data):
+        _RequestSessionProtocol.write(self, data)
+        self.detachFromRequest()
 
-    def buildProtocol(self, addr):
-        instance = self.protocol(self, self.wrappedFactory.buildProtocol(addr))
-        callback = self.makeTerminationCallback(instance)
-        timeoutClock.setTerminateSessionCallback(callback)
-        return instance
+    def writeSequence(self, data):
+        _RequestSessionProtocol.writeSequence(self, data)
+        self.detachFromRequest()
+
+
+class XHRSessionFactory(_RequestSessionFactory):
+    protocol = XHRSession

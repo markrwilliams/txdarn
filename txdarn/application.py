@@ -1,4 +1,6 @@
+from twisted.web.server import NOT_DONE_YET
 from txdarn import resources as R
+from txdarn import protocol as P
 
 import klein
 
@@ -7,7 +9,7 @@ class TxDarn(object):
 
     app = klein.Klein()
 
-    def __init__(self, config):
+    def __init__(self, factory, config):
         self.config = config
 
         self._greeting = R.Greeting()
@@ -15,7 +17,12 @@ class TxDarn(object):
             sockJSURL=self.config['sockjs-url'])
         self._info = R.InfoResource(
             websocketsEnabled=self.config['websockets'])
-        self._sessionManager = R.SessionManager()
+
+        self._sockJSFactory = P.SockJSProtocolFactory(factory)
+
+        self._xhrFactory = P.XHRSessionFactory(self._sockJSFactory)
+        self._sessions = P.SessionHouse(self._xhrFactory,
+                                        self.config['timeout'])
 
     @app.route('/', strict_slashes=False)
     def greeting(self, request):
@@ -30,6 +37,17 @@ class TxDarn(object):
     def info(self, request):
         return self._info
 
-    # with app.subroute('/<server_id>/<session_id>') as sessionApp:
-    #     @sessionApp.route('/xhr')
-    #     def xhr(self, server_id, session_id):
+    with app.subroute('/<serverID>/<sessionID>') as sessionApp:
+        @sessionApp.route('/xhr')
+        def xhr(self, request, serverID, sessionID):
+            self._sessions.attachToSession(sessionID, request)
+            return request.notifyFinish()
+
+        @sessionApp.route('/xhr_send')
+        def xhr_send(self, request, serverID, sessionID):
+            if self._sessions.writeToSession(sessionID,
+                                             request.content.read()):
+                request.setResponseCode(204)
+            else:
+                request.setResponseCode(404)
+            return ''
