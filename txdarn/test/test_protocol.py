@@ -292,14 +292,14 @@ class SockJSProtocolTestCase(unittest.TestCase):
         self.assertEqual(self.transport.value(), expectedProtocolTrace)
 
 
-class TestFactoryForRequestWrapperProtocol(WrappingFactory):
+class TestFactoryForRequestSessionProtocol(WrappingFactory):
     '''
-    A factory for testing RequestWrapperProtocol
+    A factory for testing RequestSessionProtocol
     '''
-    protocol = P._RequestWrapperProtocol
+    protocol = P._RequestSessionProtocol
 
 
-class RequestWrapperProtocolTestCase(unittest.TestCase):
+class RequestSessionProtocolTestCase(unittest.TestCase):
 
     def setUp(self):
         self.transport = StringTransport()
@@ -307,14 +307,14 @@ class RequestWrapperProtocolTestCase(unittest.TestCase):
         self.request.transport = self.transport
 
         wrappedFactory = Factory.forProtocol(EchoProtocol)
-        self.factory = TestFactoryForRequestWrapperProtocol(wrappedFactory)
+        self.factory = TestFactoryForRequestSessionProtocol(wrappedFactory)
 
         self.protocol = self.factory.buildProtocol(self.request.getHost())
         self.protocol.makeConnectionFromRequest(self.request)
 
     def test_makeConnection_forbidden(self):
         '''
-        RequestWrapperProtocol.makeConnection raises a RuntimeError.
+        RequestSessionProtocol.makeConnection raises a RuntimeError.
         '''
         protocol = self.factory.buildProtocol(self.request.getHost())
 
@@ -322,7 +322,7 @@ class RequestWrapperProtocolTestCase(unittest.TestCase):
             protocol.makeConnection(self.transport)
 
     def test_write(self):
-        ''' RequestWrapperProtocol.write writes data to the request, not the
+        ''' RequestSessionProtocol.write writes data to the request, not the
         transport.
 
         '''
@@ -331,7 +331,7 @@ class RequestWrapperProtocolTestCase(unittest.TestCase):
         self.assertFalse(self.transport.value())
 
     def test_writeSequence(self):
-        '''RequestWrapperProtocol.writeSequence also writes data to the
+        '''RequestSessionProtocol.writeSequence also writes data to the
         request, not the transport.
 
         '''
@@ -340,7 +340,7 @@ class RequestWrapperProtocolTestCase(unittest.TestCase):
         self.assertFalse(self.transport.value())
 
     def test_loseConnection(self):
-        '''RequestWrapperProtocol.loseConnection finishes the request.'''
+        '''RequestSessionProtocol.loseConnection finishes the request.'''
 
         finishedDeferred = self.request.notifyFinish()
 
@@ -359,7 +359,7 @@ class RequestWrapperProtocolTestCase(unittest.TestCase):
         return finishedDeferred
 
     def test_connectionLost(self):
-        '''RequestWrapperProtocol.connectionLost calls through to the wrapped
+        '''RequestSessionProtocol.connectionLost calls through to the wrapped
         protocol with Connection Done when there's no pending data.
 
         '''
@@ -380,7 +380,7 @@ class RequestWrapperProtocolTestCase(unittest.TestCase):
         return ensureCalled
 
     def test_detachAndReattach(self):
-        '''RequestWrapperProtocol.detachFromRequest buffers subsequent writes,
+        '''RequestSessionProtocol.detachFromRequest buffers subsequent writes,
         which are flushed as soon as makeConnectionFromRequest is
         called again.
 
@@ -398,7 +398,7 @@ class RequestWrapperProtocolTestCase(unittest.TestCase):
                                                 b'written!'])
 
     def test_doubleMakeConnectionFromRequestClosesDuplicate(self):
-        '''A RequestWrapperProtocol that's attached to a request will close a
+        '''A RequestSessionProtocol that's attached to a request will close a
         second request with an error message.
 
         '''
@@ -414,7 +414,7 @@ class RequestWrapperProtocolTestCase(unittest.TestCase):
         self.assertEqual(self.request.written, [b'hello'])
 
     def test_loseConnection_whenDetached(self):
-        '''A RequestWrapperProtocol with pending data has loseConnection
+        '''A RequestSessionProtocol with pending data has loseConnection
         called, its connectionLost method receives a SessionTimeout
         failure.
         '''
@@ -438,7 +438,7 @@ class RequestWrapperProtocolTestCase(unittest.TestCase):
         return ensureCalled
 
     def test_connectionLost_whenDetached(self):
-        '''A RequestWrapperProtocol with pending data has loseConnection
+        '''A RequestSessionProtocol with pending data has loseConnection
         called, its connectionLost method receives a SessionTimeout
         failure.
         '''

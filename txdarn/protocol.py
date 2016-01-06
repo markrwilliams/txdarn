@@ -4,6 +4,7 @@ from automat import MethodicalMachine
 
 import eliot
 
+from twisted.internet import defer
 from twisted.python.constants import Values, ValueConstant
 from twisted.internet import reactor, protocol, error
 from twisted.python import failure
@@ -223,7 +224,6 @@ class SockJSProtocolMachine(object):
                    enter=disconnected,
                    outputs=[_writeCloseFrame])
 
-
 loggingRepr = six.moves.reprlib.Repr().repr
 
 
@@ -321,10 +321,10 @@ class RequestSessionMachine(object):
     _machine = MethodicalMachine()
     request = None
 
-    def __init__(self, serverProtocol, completeConnection):
+    def __init__(self, serverProtocol):
         self.buffer = []
         self.serverProtocol = serverProtocol
-        self._completeConnection = completeConnection
+        self.connectionCompleted = defer.Deferred()
 
     @_machine.state(initial=True)
     def neverConnected(self):
@@ -399,8 +399,8 @@ class RequestSessionMachine(object):
         self.request = request
 
     @_machine.output()
-    def _completeConnectionWrapping(self, request):
-        self._completeConnection(request)
+    def _completeConnection(self, request):
+        self.connectionCompleted(request)
 
     @_machine.output()
     def _receive(self, data):
@@ -438,6 +438,13 @@ class RequestSessionMachine(object):
             request.finish()
 
     @_machine.output()
+    def _closeRequestForDeadSession(self, request):
+        assert self.request is None
+        message = SockJSProtocolMachine.closeFrame(DISCONNECT.GO_AWAY)
+        request.write(message)
+        request.finish()
+
+    @_machine.output()
     def _closeProtocol(self, reason=protocol.connectionDone):
         self.serverProtocol.connectionLost(reason=protocol.connectionDone)
         self.serverProtocol = None
@@ -459,7 +466,7 @@ class RequestSessionMachine(object):
     neverConnected.upon(attach,
                         enter=connectedHaveTransport,
                         outputs=[_openRequest,
-                                 _completeConnectionWrapping],
+                                 _connectionCompleted],
                         collector=_collectReturnTrue)
 
     connectedHaveTransport.upon(write,
@@ -534,78 +541,20 @@ class RequestSessionMachine(object):
                                enter=loseConnectionPending,
                                outputs=[])
 
-
-class _RequestWrapperProtocol(ProtocolWrapper):
-    """A protocol wrapper that uses an http.Request object as its
-    transport.
-
-    The protocol cannot be started without a request, but it may outlive that
-    and many subsequent requests.
-
-    This is the base class for polling SockJS transports
-
-    """
-    request = None
-
-    def __init__(self, *args, **kwargs):
-        ProtocolWrapper.__init__(self, *args, **kwargs)
-        self.sessionMachine = RequestSessionMachine(
-            self.wrappedProtocol,
-            completeConnection=self._completeConnectionWrapping)
-
-    def makeConnection(self, transport):
-        name = self.__class__.__name__
-        raise RuntimeError(
-            "Do not use {name}.makeConnection;"
-            " instead use {name}.makeConnectionFromRequest".format(name=name))
-
-    def _completeConnectionWrapping(self, request):
-        ProtocolWrapper.makeConnection(self, request.transport)
-
-    def makeConnectionFromRequest(self, request):
-        return self.sessionMachine.attach(request)
-
-    def detachFromRequest(self):
-        self.sessionMachine.detach()
-
-    def write(self, data):
-        self.sessionMachine.write(data)
-
-    def writeSequence(self, data):
-        for datum in data:
-            self.sessionMachine.write(datum)
-
-    def dataReceived(self, data):
-        self.sessionMachine.dataReceived(data)
-
-    def loseConnection(self):
-        self.disconnecting = 1
-        self.sessionMachine.detach()
-        self.sessionMachine.loseConnection()
-
-    def registerProducer(self, producer, streaming):
-        # TODO: implement this!
-        raise NotImplementedError
-
-    def unregisterProducer(self):
-        # TODO: implement this!
-        raise NotImplementedError
-
-    def connectionLost(self, reason=protocol.connectionDone):
-        self.factory.unregisterProtocol(self)
-        self.sessionMachine.detach()
-        self.sessionMachine.connectionLost(reason)
-        self.sessionMachine = None
+    disconnected.upon(attach,
+                      enter=disconnected,
+                      outputs=[_closeRequestForDeadSession],
+                      collector=_collectReturnFalse)
 
 
 class TimeoutClock(object):
     _machine = MethodicalMachine()
     timeout = None
 
-    def __init__(self, terminateSession, length=5.0, clock=reactor):
-        self._cbTerminateSession = terminateSession
+    def __init__(self, length=5.0, clock=reactor):
         self.length = length
         self.clock = clock
+        self.terminated = defer.Deferred()
 
     @_machine.state(initial=True)
     def unscheduled(self):
@@ -623,6 +572,12 @@ class TimeoutClock(object):
         '''This timeout clock is permanently stopped, because the session
         expired.
 
+        '''
+
+    @_machine.input()
+    def setTerminateSessionCallback(self, callback):
+        '''Set the terminate session callback.  Must be done before start can
+        be called.
         '''
 
     @_machine.input()
@@ -658,12 +613,123 @@ class TimeoutClock(object):
     @_machine.output()
     def _terminateSession(self):
         '''Call our session termination callback.'''
-        self._cbTerminateSession()
+        self.terminated.callback(None)
 
     unscheduled.upon(start, enter=scheduled, outputs=[_startTheClock])
     unscheduled.upon(expire, enter=stopped, outputs=[])
 
     scheduled.upon(reset, enter=unscheduled, outputs=[_stopTheClock,
                                                       _resetTheClock])
+
+    scheduled.upon(start, enter=scheduled, outputs=[])
+
     scheduled.upon(expire, enter=stopped, outputs=[_resetTheClock,
                                                    _terminateSession])
+    stopped.upon(start, enter=stopped, outputs=[])
+
+
+class _RequestSessionProtocol(ProtocolWrapper):
+    """A protocol wrapper that uses an http.Request object as its
+    transport.
+
+    The protocol cannot be started without a request, but it may outlive that
+    and many subsequent requests.
+
+    This is the base class for polling SockJS transports
+
+    """
+    request = None
+
+    def __init__(self, timeoutClock, *args, **kwargs):
+        ProtocolWrapper.__init__(self, *args, **kwargs)
+        self.timeoutClock = timeoutClock
+        self.sessionMachine = RequestSessionMachine(
+            self.wrappedProtocol)
+        self.sessionMachine.connectionCompleted.addCallback(
+            self._completeConnectionWrapping)
+
+    def makeConnection(self, transport):
+        name = self.__class__.__name__
+        raise RuntimeError(
+            "Do not use {name}.makeConnection;"
+            " instead use {name}.makeConnectionFromRequest".format(name=name))
+
+    def _completeConnectionWrapping(self, request):
+        ProtocolWrapper.makeConnection(self, request.transport)
+
+    def makeConnectionFromRequest(self, request):
+        if self.sessionMachine.attach(request):
+            self.timeoutClock.reset()
+
+    def detachFromRequest(self):
+        self.sessionMachine.detach()
+        self.timeoutClock.start()
+
+    def write(self, data):
+        self.sessionMachine.write(data)
+
+    def writeSequence(self, data):
+        for datum in data:
+            self.sessionMachine.write(datum)
+
+    def dataReceived(self, data):
+        self.sessionMachine.dataReceived(data)
+
+    def loseConnection(self):
+        self.disconnecting = 1
+        self.sessionMachine.detach()
+        self.sessionMachine.loseConnection()
+        self.timeoutClock.start()
+
+    def registerProducer(self, producer, streaming):
+        # TODO: implement this!
+        raise NotImplementedError
+
+    def unregisterProducer(self):
+        # TODO: implement this!
+        raise NotImplementedError
+
+    def connectionLost(self, reason=protocol.connectionDone):
+        self.factory.unregisterProtocol(self)
+        self.sessionMachine.detach()
+        self.sessionMachine.connectionLost(reason)
+        self.sessionMachine = None
+
+
+class SessionHouse(object):
+
+    def __init__(self, factory, timeout=5.0, timeoutFactory=TimeoutClock):
+        self.factory = factory
+        self.timeout = timeout
+        self.sessions = {}
+
+    def makeSession(self, request):
+        timeoutClock = self.timeoutFactory(self.timeout)
+        self.factory.buildProtocol(timeoutClock)
+
+    def attachToSession(self, sessionID, request):
+        session = self.sessions.get(sessionID)
+        if not session:
+            session = self.sessions[sessionID] = self.makeSession(request)
+        session.makeConnectionFromRequest(request)
+
+    def writeToSession(self, sessionID, data):
+        try:
+            session = self.sessions[sessionID]
+        except KeyError:
+            return False
+        else:
+            session.dataReceived(data)
+            return True
+
+
+class _RequestSessionFactory(WrappingFactory):
+    protocol = _RequestSessionProtocol
+
+    def __init__(self, )
+
+    def buildProtocol(self, addr):
+        instance = self.protocol(self, self.wrappedFactory.buildProtocol(addr))
+        callback = self.makeTerminationCallback(instance)
+        timeoutClock.setTerminateSessionCallback(callback)
+        return instance
