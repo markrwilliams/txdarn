@@ -229,14 +229,14 @@ class SockJSWireProtocolWrapper(ProtocolWrapper):
     def closeFrame(reason, jsonEncoder=None):
         frameValue = [b'c',
                       sockJSJSON(reason.value, cls=jsonEncoder),
-                      '\n']
+                      b'\n']
         return b''.join(frameValue)
 
     def writeClose(self, reason):
         self.write(self.closeFrame(reason, jsonEncoder=self.jsonEncoder))
 
     def writeData(self, data):
-        frameValue = [b'a', sockJSJSON(data, cls=self.jsonEncoder), '\n']
+        frameValue = [b'a', sockJSJSON(data, cls=self.jsonEncoder), b'\n']
         frame = b''.join(frameValue)
         self.write(frame)
 
@@ -275,7 +275,7 @@ class SockJSProtocol(ProtocolWrapper):
         self.wrappedProtocol.dataReceived(data)
 
     def write(self, data):
-        self.sockJSMachine.write([data])
+        self.sockJSMachine.write(data)
 
     def writeSequence(self, data):
         self.sockJSMachine.write(data)
@@ -429,7 +429,7 @@ class RequestSessionMachine(object):
     def _flushBuffer(self, request):
         '''Flush any pending data from the buffer to the request'''
         assert request is self.requestSession.request
-        self.requestSession.completeWrite(self.buffer)
+        self.requestSession.writeData(self.buffer)
         self.buffer = []
 
     @_machine.output()
