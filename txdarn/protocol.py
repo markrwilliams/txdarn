@@ -15,27 +15,6 @@ def _trapCancellation(failure):
     failure.trap(defer.CancelledError)
 
 
-def _makeCollectAndReturn(value):
-    '''Make an Automat collector function that consumes its output genexp and
-    returns value.
-
-    '''
-
-    def _collectReturnValue(outputs):
-        list(outputs)
-        return value
-
-    return _collectReturnValue
-
-
-def _returnLastValue(outputs):
-    '''An Automat collector that returns the last output's value.'''
-    output = None
-    for output in outputs:
-        pass
-    return output
-
-
 def sockJSJSON(data, cls=None):
     # no spaces
     return asJSON(data, separators=(',', ':'), cls=cls)
