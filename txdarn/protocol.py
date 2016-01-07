@@ -310,9 +310,6 @@ class SockJSProtocol(ProtocolWrapper):
         self.sockJSMachine = None
         self.wrappedProtocol.connectionLost(reason)
 
-    def pauseHeartbeat(self):
-        self.sockJSMachine.pause
-
 
 class SockJSProtocolFactory(WrappingFactory):
     """Factory that wraps another factory to provide the SockJS protocol.
@@ -406,7 +403,7 @@ class RequestSessionMachine(object):
         '''The protocol wants to send a heartbeat.'''
 
     @_machine.input()
-    def loseConnection(self, reason=protocol.connectionDone):
+    def loseConnection(self):
         '''Lose the request, if applicable.'''
 
     @_machine.input()
@@ -435,17 +432,17 @@ class RequestSessionMachine(object):
     def _flushBuffer(self, request):
         '''Flush any pending data from the buffer to the request'''
         assert request is self.requestSession.request
-        self.requestSession.directWrite(self.buffer)
+        self.requestSession.completeWrite(self.buffer)
         self.buffer = []
 
     @_machine.output()
     def _directWrite(self, data):
         '''Skip our buffer'''
-        self.requestSession.directWrite(data)
+        self.requestSession.completeWrite(data)
 
     @_machine.output()
     def _directHeartbeat(self):
-        self.requestSession.directHeartbeat()
+        self.requestSession.completeHeartbeat()
 
     @_machine.output()
     def _closeRequest(self):
@@ -464,8 +461,12 @@ class RequestSessionMachine(object):
         request.finish()
 
     @_machine.output()
+    def _loseConnection(self):
+        self.requestSession.completeLoseConnection()
+
+    @_machine.output()
     def _closeProtocol(self, reason=protocol.connectionDone):
-        self.requestSession.directConnectionLost(reason)
+        self.requestSession.completeConnectionLost(reason)
         self.requestSession = None
 
     @_machine.output()
@@ -473,7 +474,7 @@ class RequestSessionMachine(object):
         if isinstance(reason.value, error.ConnectionDone):
             reason = failure.Failure(SessionTimeout())
         self.requestSession.request = None
-        self.requestSession.directConnectionLost(reason=reason)
+        self.requestSession.completeConnectionLost(reason=reason)
         self.requestSession = None
 
     neverConnected.upon(write,
@@ -576,18 +577,20 @@ class TimeoutClock(object):
     '''
     Expires sessions.
     '''
+    EXPIRED = 'EXPIRED'
+
     expired = False
     timeoutCall = None
 
-    def __init__(self, length=5.0, clock=reactor):
+    def __init__(self, terminationDeferred, length=5.0, clock=reactor):
         self.length = length
         self.clock = clock
-        self.terminated = defer.Deferred()
-        self.terminated.addCallback(self._cbExpire)
+        self.terminationDeferred = terminationDeferred
 
-    def _cbExpire(self, ignored):
+    def _expire(self):
         self.expired = True
         self.timeoutCall = None
+        self.terminationDeferred.callback(self.EXPIRED)
 
     def reset(self):
         if self.expired:
@@ -603,13 +606,11 @@ class TimeoutClock(object):
 
         if not self.expired and self.timeoutCall is None:
             self.timeoutCall = self.clock.callLater(self.length,
-                                                    self.terminated.callback,
-                                                    "CAME UP")
+                                                    self._expire)
 
     def stop(self):
         if not self.expired and self.timeoutCall is not None:
             self.timeoutCall.cancel()
-        self.terminated.cancel()
 
 
 class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
@@ -625,11 +626,11 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
     request = None
     finishedNotifier = None
 
-    def __init__(self, timeoutClock, *args, **kwargs):
+    def __init__(self, terminationDeferred, timeoutClock, *args, **kwargs):
         SockJSWireProtocolWrapper.__init__(self, *args, **kwargs)
         self.timeoutClock = timeoutClock
+        self.terminationDeferred = terminationDeferred
         self.sessionMachine = RequestSessionMachine(self)
-        self.disconnected = defer.Deferred()
 
     def makeConnection(self, transport):
         name = self.__class__.__name__
@@ -639,11 +640,10 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
 
     @property
     def attached(self):
-        return self._request is None
+        return self.request is not None
 
     def makeConnectionFromRequest(self, request):
         if self.sessionMachine.attach(request):
-            print "ATTACHED", self.request
             self.finishedNotifier = self.request.notifyFinish()
             self.finishedNotifier.addErrback(_trapCancellation)
             self.finishedNotifier.addErrback(self.connectionLost)
@@ -663,10 +663,10 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
         self.sessionMachine.heartbeat()
 
     def loseConnection(self):
-        self.disconnecting = 1
-        self.sessionMachine.detach()
-        self.sessionMachine.loseConnection()
-        self.timeoutClock.start()
+        if not self.disconnecting:
+            self.disconnecting = 1
+            self.sessionMachine.loseConnection()
+            self.timeoutClock.start()
 
     def registerProducer(self, producer, streaming):
         # TODO: implement this!
@@ -678,26 +678,25 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
 
     def connectionLost(self, reason=protocol.connectionDone):
         if not self.disconnecting:
-            self.disconnected.callback(None)
+            self.terminationDeferred.errback(reason)
             self.timeoutClock.stop()
-        else:
-            self.disconnected.cancel()
-
-        self.factory.unregisterProtocol(self)
         self.sessionMachine.connectionLost(reason)
         self.sessionMachine = None
 
     def completeConnection(self, request):
         ProtocolWrapper.makeConnection(self, request.transport)
 
-    def directWrite(self, data):
+    def completeWrite(self, data):
         SockJSWireProtocolWrapper.writeData(self, data)
 
-    def directHeartbeat(self):
+    def completeHeartbeat(self):
         SockJSWireProtocolWrapper.writeHeartbeat(self)
 
-    def directConnectionLost(self, reason):
+    def completeConnectionLost(self, reason):
         SockJSWireProtocolWrapper.connectionLost(self, reason)
+
+    def completeLoseConnection(self, reason):
+        SockJSWireProtocolWrapper.loseConnection(self)
 
     def finishCurrentRequest(self):
         if self.finishedNotifier:
@@ -710,8 +709,9 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
 class RequestSessionWrappingFactory(SockJSWireProtocolWrappingFactory):
     protocol = RequestSessionProtocolWrapper
 
-    def buildProtocol(self, timeoutClock, addr):
-        return self.protocol(timeoutClock,
+    def buildProtocol(self, terminationDeferred, timeoutClock, addr):
+        return self.protocol(terminationDeferred,
+                             timeoutClock,
                              self,
                              self.wrappedFactory.buildProtocol(addr))
 
@@ -725,29 +725,31 @@ class SessionHouse(object):
         self.sessions = {}
 
     def makeSession(self, sessionID, request):
-        timeoutClock = self.timeoutFactory(self.timeout)
-        protocol = self.factory.buildProtocol(timeoutClock,
+        terminationDeferred = defer.Deferred()
+
+        timeoutClock = self.timeoutFactory(terminationDeferred, self.timeout)
+        protocol = self.factory.buildProtocol(terminationDeferred,
+                                              timeoutClock,
                                               request.transport.getHost())
 
-        timeoutDeferred = timeoutClock.terminated
-        timeoutDeferred.addCallback(self._sessionTimedOut, sessionID)
-        timeoutDeferred.addErrback(_trapCancellation)
-        timeoutDeferred.addErrback(eliot.writeFailure)
-
-        disconnectedDeferred = protocol.disconnected
-        disconnectedDeferred.addCallback(self._sessionDisconnected, sessionID)
-        disconnectedDeferred.addErrback(_trapCancellation)
-        disconnectedDeferred.addErrback(eliot.writeFailure)
+        terminationDeferred.addCallback(self._sessionTimedOut, sessionID)
+        terminationDeferred.addErrback(self._sessionDisconnected, sessionID)
+        terminationDeferred.addErrback(eliot.writeFailure)
 
         return protocol
 
-    def _sessionDisconnected(self, _, sessionID):
+    def _sessionDisconnected(self, failure, sessionID):
+        failure.trap(error.ConnectionDone,
+                     error.ConnectionLost,
+                     SessionTimeout)
         del self.sessions[sessionID]
 
-    def _sessionTimedOut(self, _, sessionID):
-        protocol = self.sessions.pop(sessionID)
-        assert not protocol.attached
-        protocol.connectionLost()
+    def _sessionTimedOut(self, reason, sessionID):
+        if reason is TimeoutClock.EXPIRED:
+            protocol = self.sessions.pop(sessionID)
+            assert not protocol.attached
+            protocol.disconnecting = 1
+            protocol.connectionLost()
 
     def attachToSession(self, sessionID, request):
         session = self.sessions.get(sessionID)
