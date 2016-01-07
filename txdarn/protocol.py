@@ -1,5 +1,3 @@
-from collections import namedtuple
-
 from automat import MethodicalMachine
 
 import eliot
@@ -10,32 +8,30 @@ from twisted.internet import reactor, protocol, error
 from twisted.python import failure
 from twisted.protocols.policies import ProtocolWrapper, WrappingFactory
 
-import six.moves
-
 from txdarn.compat import asJSON, fromJSON
 
 
-def _collectReturnFalse(outputs):
-    '''An Automat collector function that consumes its output genexp and
-    returns False.
+def _makeCollectAndReturn(value):
+    '''Make an Automat collector function that consumes its output genexp and
+    returns value.
 
     '''
-    list(outputs)
-    return False
 
+    def _collectReturnValue(outputs):
+        list(outputs)
+        return value
 
-def _collectReturnTrue(outputs):
-    '''An Automat collector function that consumes its output genexp and
-    returns True.
-
-    '''
-    list(outputs)
-    return True
+    return _collectReturnValue
 
 
 def sockJSJSON(data, cls=None):
     # no spaces
     return asJSON(data, separators=(',', ':'), cls=cls)
+
+
+class INVALID_DATA(Values):
+    NO_PAYLOAD = ValueConstant(b'Payload expected.')
+    BAD_JSON = ValueConstant(b'Broken JSON encoding. ')
 
 
 class DISCONNECT(Values):
@@ -44,93 +40,58 @@ class DISCONNECT(Values):
 
 
 class HeartbeatClock(object):
-    _machine = MethodicalMachine()
+    '''Schedules an recurring heartbeat frame, but only if no data has
+    been written recently.
+
+    '''
+
     writeHeartbeat = None
     pendingHeartbeat = None
+    stopped = False
 
-    def __init__(self, writeHeartbeat=None, period=5.0, clock=reactor):
+    def __init__(self, writeHeartbeat=None, period=25.0, clock=reactor):
         self.writeHeartbeat = writeHeartbeat
         self.period = period
         self.clock = clock
 
-    @_machine.state(initial=True)
-    def unscheduled(self):
-        '''No heartbeat is scheduled.'''
-
-    @_machine.state()
-    def scheduled(self):
-        '''A heartbeat is pending.'''
-
-    @_machine.state()
-    def stopped(self):
-        '''The clock is permanently stopped.'''
-
-    @_machine.input()
-    def sent(self):
-        '''A heartbeat has been sent.'''
-
-    @_machine.input()
-    def schedule(self):
-        '''Schedule another heartbeat, cancel any pending'''
-
-    @_machine.input()
-    def stop(self):
-        '''Stop this clock forever'''
-
-    @_machine.output()
-    def _reschedule(self):
-        self.schedule()
-
-    @_machine.output()
-    def _resetTheClock(self):
-        '''Drop our pending heartbeat because it's either been completed or
-        canceled.
-
-        '''
-        self.pendingHeartbeat = None
-
-    @_machine.output()
-    def _stopTheClock(self):
-        '''Cancel our pending heartbeat.'''
-        self.pendingHeartbeat.cancel()
-
-    def _sendHeartbeat(self):
-        '''Complete our pending heartbeat.'''
-        self.writeHeartbeat()
-        self.sent()
-
-    @_machine.output()
-    def _startTheClock(self):
-        '''Schedule our next heartbeat.'''
+    def _createHeartbeatCall(self):
         self.pendingHeartbeat = self.clock.callLater(self.period,
                                                      self._sendHeartbeat)
 
-    unscheduled.upon(schedule, enter=scheduled, outputs=[_startTheClock])
-    unscheduled.upon(stop, enter=stopped, outputs=[])
+    def _sendHeartbeat(self):
+        self.writeHeartbeat()
+        self._createHeartbeatCall()
 
-    scheduled.upon(schedule, enter=unscheduled, outputs=[_stopTheClock,
-                                                         _resetTheClock,
-                                                         _reschedule])
-    scheduled.upon(sent, enter=unscheduled, outputs=[_resetTheClock,
-                                                     _reschedule])
+    def schedule(self):
+        """Schedule or reschedule the next heartbeat."""
+        if self.stopped:
+            raise RuntimeError("Can't schedule stopped heartbeat")
 
-    scheduled.upon(stop, enter=stopped, outputs=[_stopTheClock,
-                                                 _resetTheClock])
+        if self.pendingHeartbeat is None:
+            self._createHeartbeatCall()
+        else:
+            self.pendingHeartbeat.reset(self.period)
+
+    def stop(self):
+        """Permanently stop sending heartbeats."""
+        if not self.stopped:
+            self.stopped = True
+            if self.pendingHeartbeat is not None:
+                self.pendingHeartbeat.cancel()
+                self.pendingHeartbeat = None
 
 
 class SockJSProtocolMachine(object):
     _machine = MethodicalMachine()
     transport = None
 
-    def __init__(self, heartbeater, jsonEncoder=None, jsonDecoder=None):
+    def __init__(self, heartbeater):
         self.heartbeater = heartbeater
-        self.jsonEncoder = jsonEncoder
-        self.jsonDecoder = jsonDecoder
 
     @classmethod
-    def withHeartbeater(cls, heartbeater, jsonEncoder=None, jsonDecoder=None):
+    def withHeartbeater(cls, heartbeater):
         """Connect a SockJSProtocolMachine to its heartbeater."""
-        instance = cls(heartbeater, jsonEncoder, jsonDecoder)
+        instance = cls(heartbeater)
         heartbeater.writeHeartbeat = instance.heartbeat
         return instance
 
@@ -158,7 +119,7 @@ class SockJSProtocolMachine(object):
     def _connectionEstablished(self, transport):
         '''Store a reference to our transport and write an open frame.'''
         self.transport = transport
-        self.transport.write(b'o')
+        self.transport.writeOpen()
         self.heartbeater.schedule()
 
     @_machine.input()
@@ -168,7 +129,7 @@ class SockJSProtocolMachine(object):
     @_machine.output()
     def _writeToTransport(self, data):
         '''Frame the array-like thing and write it.'''
-        self.transport.write(b'a' + sockJSJSON(data, cls=self.jsonEncoder))
+        self.transport.writeData(data)
         self.heartbeater.schedule()
 
     @_machine.input()
@@ -177,7 +138,8 @@ class SockJSProtocolMachine(object):
 
     @_machine.output()
     def _received(self, data):
-        return fromJSON(data, cls=self.jsonDecoder)
+        """Receive data -- just for completeness' sake"""
+        return data
 
     @_machine.input()
     def heartbeat(self):
@@ -186,7 +148,7 @@ class SockJSProtocolMachine(object):
     @_machine.output()
     def _writeHeartbeatToTransport(self):
         '''Write a heartbeat frame'''
-        self.transport.write(b'h')
+        self.transport.writeHeartbeat()
 
     @_machine.input()
     def disconnect(self, reason=DISCONNECT.GO_AWAY):
@@ -196,17 +158,13 @@ class SockJSProtocolMachine(object):
     def close(self):
         '''Our connection has been closed'''
 
-    @staticmethod
-    def closeFrame(reason):
-        return b'c' + sockJSJSON(reason.value)
-
     @_machine.output()
     def _writeCloseFrame(self, reason=DISCONNECT.GO_AWAY):
         '''Write a close frame with the given reason and schedule this
         connection close.
 
         '''
-        self.transport.write(self.closeFrame(reason))
+        self.transport.writeClose(reason)
         self.transport.loseConnection()
         self.transport = None
 
@@ -246,104 +204,116 @@ class SockJSProtocolMachine(object):
                        outputs=[_stopHeartbeat])
 
 
-loggingRepr = six.moves.reprlib.Repr().repr
+class SockJSWireProtocolWrapper(ProtocolWrapper):
+    '''Serialize and deserialize SockJS protocol elements.  Used as a
+    base class for various transports.
+
+    '''
+
+    def __init__(self, factory, wrappedProtocol):
+        ProtocolWrapper.__init__(self, factory, wrappedProtocol)
+        self.jsonDecoder = self.factory.jsonDecoder
+        self.jsonEncoder = self.factory.jsonEncoder
+
+    def _jsonReceived(self, data):
+        self.wrappedProtocol.dataReceived(data)
+
+    def dataReceived(self, data):
+        if not data:
+            self.transport.write(INVALID_DATA.NO_PAYLOAD.value)
+        else:
+            try:
+                self._jsonReceived(fromJSON(data, cls=self.jsonDecoder))
+            except ValueError:
+                self.transport.write(INVALID_DATA.BAD_JSON.value)
+
+    def writeOpen(self):
+        '''Write an open frame.'''
+        self.write(b'o\n')
+
+    def writeHeartbeat(self):
+        self.write(b'h\n')
+
+    def writeClose(self, reason):
+        frameValue = [b'c',
+                      sockJSJSON(reason.value, cls=self.jsonEncoder),
+                      '\n']
+        frame = b''.join(frameValue)
+        self.write(frame)
+
+    def writeData(self, data):
+        frameValue = [b'a', sockJSJSON(data, cls=self.jsonEncoder), '\n']
+        frame = b''.join(frameValue)
+        self.write(frame)
+
+
+class SockJSWireProtocolWrappingFactory(WrappingFactory):
+    '''Factory that wraps a transport with SockJSWireProtocolWrapper.
+    Used by transport factories (e.g., HTTP request, websocket
+    connection).
+
+    '''
+    protocol = SockJSWireProtocolWrapper
+
+    def __init__(self, wrappedFactory, jsonEncoder=None, jsonDecoder=None):
+        WrappingFactory.__init__(self, wrappedFactory)
+        self.jsonEncoder = jsonEncoder
+        self.jsonDecoder = jsonDecoder
 
 
 class SockJSProtocol(ProtocolWrapper):
+    '''Wrap a user-supplied protocol for use with SockJS.'''
 
-    def __init__(self, factory, wrappedProtocol, sockJSMachine):
+    def __init__(self, factory, wrappedProtocol, heartbeatPeriod,
+                 clock=reactor):
         ProtocolWrapper.__init__(self, factory, wrappedProtocol)
-        self.sockJSMachine = sockJSMachine
+        heartbeater = HeartbeatClock(period=heartbeatPeriod, clock=clock)
+        self.sockJSMachine = SockJSProtocolMachine.withHeartbeater(heartbeater)
 
     def connectionMade(self):
-        action_type = '{}.connectionMade'.format(self.__class__.__name__)
         # don't catch any exception here - we want to stop
         # ProtocolWrapper.makeConnection from calling
         # self.wrappedProtocol.makeConnection
-        with eliot.start_action(action_type=action_type):
-            self.sockJSMachine.connect(self.transport)
+        self.sockJSMachine.connect(self.transport)
 
     def dataReceived(self, data):
-        action_type = '{}.dataReceived'.format(self.__class__.__name__)
-        try:
-            with eliot.start_action(action_type=action_type):
-                eliot.Message.log(data=loggingRepr(data))
-
-                decoded = self.sockJSMachine.receive(data)
-
-        except Exception:
-            pass
-        else:
-            self.wrappedProtocol.dataReceived(decoded)
+        data = self.sockJSMachine.receive(data)
+        self.wrappedProtocol.dataReceived(data)
 
     def write(self, data):
-        try:
-            action_type = '{}.write'.format(self.__class__.__name__)
-            with eliot.start_action(action_type=action_type):
-                eliot.Message.log(data=loggingRepr(data))
-
-                self.sockJSMachine.write([data])
-
-        except Exception:
-            pass
+        self.sockJSMachine.write([data])
 
     def writeSequence(self, data):
-        try:
-            action_type = '{}.writeSequence'.format(self.__class__.__name__)
-            with eliot.start_action(action_type=action_type):
-                eliot.Message.log(data=loggingRepr(data))
-
-                self.sockJSMachine.write(data)
-
-        except Exception:
-            pass
+        self.sockJSMachine.write(data)
 
     def loseConnection(self):
-        try:
-            action_type = '{}.loseConnection'.format(self.__class__.__name__)
-            with eliot.start_action(action_type=action_type):
-
-                self.sockJSMachine.disconnect()
-
-        except Exception:
-            pass
+        self.sockJSMachine.disconnect()
 
     def connectionLost(self, reason=protocol.connectionDone):
-        try:
-            action_type = '{}.loseConnection'.format(self.__class__.__name__)
-            with eliot.start_action(action_type=action_type):
-
-                self.sockJSMachine.close()
-        except Exception:
-            pass
-        else:
-            self.wrappedProtocol.connectionLost(reason)
+        self.sockJSMachine.close()
+        self.sockJSMachine = None
+        self.wrappedProtocol.connectionLost(reason)
 
 
 class SockJSProtocolFactory(WrappingFactory):
     """Factory that wraps another factory to provide the SockJS protocol.
 
+    Wrap your protocol's factory with this for use with TxDarnApp.
+
     """
 
     protocol = SockJSProtocol
 
-    def __init__(self, wrappedProtocol,
-                 jsonEncoder=None, jsonDecoder=None,
-                 heartbeatPeriod=5.0, clock=reactor):
-        WrappingFactory.__init__(self, wrappedProtocol)
-        self.jsonEncoder = jsonEncoder
-        self.jsonDecoder = jsonDecoder
+    def __init__(self, wrappedFactory, heartbeatPeriod=25.0, clock=reactor):
+        WrappingFactory.__init__(self, wrappedFactory)
         self.heartbeatPeriod = heartbeatPeriod
         self.clock = clock
 
     def buildProtocol(self, addr):
-        heartbeater = HeartbeatClock(period=self.heartbeatPeriod,
-                                     clock=self.clock)
-        self.sockJSMachine = SockJSProtocolMachine.withHeartbeater(
-            heartbeater, self.jsonEncoder, self.jsonDecoder)
-
-        return self.protocol(self, self.wrappedFactory.buildProtocol(addr),
-                             self.sockJSMachine)
+        return self.protocol(self,
+                             self.wrappedFactory.buildProtocol(addr),
+                             self.heartbeatPeriod,
+                             self.clock)
 
 
 class SessionTimeout(Exception):
@@ -443,7 +413,7 @@ class RequestSessionMachine(object):
     @_machine.output()
     def _bufferWrite(self, data):
         '''Without a request, we have to buffer our writes'''
-        self.buffer.append(data)
+        self.buffer.extend(data)
 
     @_machine.output()
     def _flushBuffer(self, request):
@@ -473,6 +443,7 @@ class RequestSessionMachine(object):
     @_machine.output()
     def _closeRequestForDeadSession(self, request):
         assert self.request is None
+        # TODO: get access to SockJSWireProtocolWrapper, too
         message = SockJSProtocolMachine.closeFrame(DISCONNECT.GO_AWAY)
         request.write(message)
         request.finish()
@@ -500,7 +471,9 @@ class RequestSessionMachine(object):
                         enter=connectedHaveTransport,
                         outputs=[_openRequest,
                                  _completeConnection],
-                        collector=_collectReturnTrue)
+                        # TODO - everything but XHRSession wants this
+                        # to be True
+                        collector=_makeCollectAndReturn(False))
 
     connectedHaveTransport.upon(write,
                                 enter=connectedHaveTransport,
@@ -514,7 +487,7 @@ class RequestSessionMachine(object):
     connectedHaveTransport.upon(attach,
                                 enter=connectedHaveTransport,
                                 outputs=[_closeDuplicateRequest],
-                                collector=_collectReturnFalse)
+                                collector=_makeCollectAndReturn(False))
 
     connectedNoTransportEmptyBuffer.upon(write,
                                          enter=connectedNoTransportPending,
@@ -525,7 +498,7 @@ class RequestSessionMachine(object):
     connectedNoTransportEmptyBuffer.upon(attach,
                                          enter=connectedHaveTransport,
                                          outputs=[_openRequest],
-                                         collector=_collectReturnTrue)
+                                         collector=_makeCollectAndReturn(True))
     connectedNoTransportEmptyBuffer.upon(detach,
                                          enter=connectedNoTransportEmptyBuffer,
                                          outputs=[])
@@ -554,7 +527,7 @@ class RequestSessionMachine(object):
                                      enter=connectedHaveTransport,
                                      outputs=[_openRequest,
                                               _flushBuffer],
-                                     collector=_collectReturnFalse)
+                                     collector=_makeCollectAndReturn(False))
     connectedNoTransportPending.upon(detach,
                                      enter=connectedNoTransportPending,
                                      outputs=[])
@@ -577,95 +550,45 @@ class RequestSessionMachine(object):
     disconnected.upon(attach,
                       enter=disconnected,
                       outputs=[_closeRequestForDeadSession],
-                      collector=_collectReturnFalse)
+                      collector=_makeCollectAndReturn(False))
 
 
 class TimeoutClock(object):
-    _machine = MethodicalMachine()
-    terminated = None
+    '''
+    Expire
+    '''
+    expired = False
+    timeoutCall = None
 
     def __init__(self, length=5.0, clock=reactor):
         self.length = length
         self.clock = clock
         self.terminated = defer.Deferred()
+        self.terminated.addCallback(self._cbExpire)
 
-    @_machine.state(initial=True)
-    def unscheduled(self):
-        '''This timeout clock is attached to a session, but it is not
-        ticking.
+    def _cbExpire(self, ignored):
+        self.expired = True
+        self.timeoutCall = None
 
-        '''
-
-    @_machine.state()
-    def scheduled(self):
-        '''This timeout clock is attached to a session and ticking down.'''
-
-    @_machine.state()
-    def stopped(self):
-        '''This timeout clock is permanently stopped, because the session
-        expired.
-
-        '''
-
-    @_machine.input()
-    def setTerminateSessionCallback(self, callback):
-        '''Set the terminate session callback.  Must be done before start can
-        be called.
-        '''
-
-    @_machine.input()
-    def start(self):
-        '''Start the countdown clock.'''
-
-    @_machine.input()
     def reset(self):
-        '''Reset the timeout countdown, cancelling the previous one.  This
-        does not start the clock.
+        if self.expired:
+            raise RuntimeError("Cannot restart expired timeout.")
 
-        '''
+        if self.timeoutCall is not None:
+            self.timeoutCall.cancel()
+            self.timeoutCall = None
 
-    @_machine.input()
-    def expire(self):
-        '''The timeout has expired; time to terminate the session.'''
+    def start(self):
+        if self.expired:
+            raise RuntimeError("Cannot start expired timeout.")
 
-    @_machine.output()
-    def _startTheClock(self):
-        '''Schedule this session's timeout.'''
-        print("_startTheClock", self.length)
-        self.timeout = self.clock.callLater(self.length, self.expire)
-
-    @_machine.output()
-    def _stopTheClock(self):
-        '''Stop our timeout clock.'''
-        self.timeout.cancel()
-        print("_stopTheClock")
-
-    @_machine.output()
-    def _resetTheClock(self):
-        '''Reset our timeout to None.'''
-        self.timeout = None
-
-    @_machine.output()
-    def _terminateSession(self):
-        '''Call our session termination callback.'''
-        print("_terminateSession")
-
-        self.terminated.callback(None)
-
-    unscheduled.upon(start, enter=scheduled, outputs=[_startTheClock])
-    unscheduled.upon(reset, enter=unscheduled, outputs=[])
-
-    scheduled.upon(reset, enter=unscheduled, outputs=[_stopTheClock,
-                                                      _resetTheClock])
-
-    scheduled.upon(start, enter=scheduled, outputs=[])
-
-    scheduled.upon(expire, enter=stopped, outputs=[_resetTheClock,
-                                                   _terminateSession])
-    stopped.upon(start, enter=stopped, outputs=[])
+        if not self.expired and self.timeoutCall is None:
+            self.timeoutCall = self.clock.callLater(self.length,
+                                                    self.terminated.callback,
+                                                    None)
 
 
-class _RequestSessionProtocol(ProtocolWrapper):
+class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
     """A protocol wrapper that uses an http.Request object as its
     transport.
 
@@ -679,12 +602,13 @@ class _RequestSessionProtocol(ProtocolWrapper):
     attached = False
 
     def __init__(self, timeoutClock, *args, **kwargs):
-        ProtocolWrapper.__init__(self, *args, **kwargs)
+        SockJSWireProtocolWrapper.__init__(self, *args, **kwargs)
         self.timeoutClock = timeoutClock
         self.sessionMachine = RequestSessionMachine(
             self.wrappedProtocol)
-        self.sessionMachine.connectionCompleted.addCallback(
-            self._completeConnectionWrapping)
+
+        self.connectionCompleted = self.sessionMachine.connectionCompleted
+        self.connectionCompleted.addCallback(self._completeConnectionWrapping)
 
     def makeConnection(self, transport):
         name = self.__class__.__name__
@@ -698,13 +622,11 @@ class _RequestSessionProtocol(ProtocolWrapper):
     def makeConnectionFromRequest(self, request):
         if self.sessionMachine.attach(request):
             self.attached = True
-            print('attach')
             self.timeoutClock.reset()
 
     def detachFromRequest(self):
         self.sessionMachine.detach()
         self.attached = False
-        print("detachFromRequest")
         self.timeoutClock.start()
 
     def write(self, data):
@@ -714,7 +636,7 @@ class _RequestSessionProtocol(ProtocolWrapper):
         for datum in data:
             self.sessionMachine.write(datum)
 
-    def dataReceived(self, data):
+    def _jsonReceived(self, data):
         self.sessionMachine.dataReceived(data)
 
     def loseConnection(self):
@@ -738,8 +660,8 @@ class _RequestSessionProtocol(ProtocolWrapper):
         self.sessionMachine = None
 
 
-class _RequestSessionFactory(WrappingFactory):
-    protocol = _RequestSessionProtocol
+class RequestSessionWrappingFactory(SockJSWireProtocolWrappingFactory):
+    protocol = RequestSessionProtocolWrapper
 
     def buildProtocol(self, timeoutClock, addr):
         return self.protocol(timeoutClock,
@@ -788,20 +710,16 @@ class SessionHouse(object):
             return True
 
 
-class XHRSession(_RequestSessionProtocol):
+class XHRSession(RequestSessionProtocolWrapper):
 
-    def write(self, data):
-        _RequestSessionProtocol.write(self, data)
-        # TODO: too much protocol separation
-        if data == b'o':
-            reactor.callLater(0, self.detachFromRequest)
-        elif data != b'h':
-            self.detachFromRequest()
+    def writeOpen(self):
+        RequestSessionProtocolWrapper.writeOpen(self)
+        self.detachFromRequest()
 
-    def writeSequence(self, data):
-        _RequestSessionProtocol.writeSequence(self, data)
+    def writeData(self, data):
+        RequestSessionProtocolWrapper.writeData(self, data)
         self.detachFromRequest()
 
 
-class XHRSessionFactory(_RequestSessionFactory):
+class XHRSessionFactory(RequestSessionWrappingFactory):
     protocol = XHRSession

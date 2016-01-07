@@ -46,7 +46,7 @@ class HeartbeatClockTestCase(unittest.TestCase):
         self.heartbeater.stop()
         self.assertFalse(self.clock.getDelayedCalls())
 
-        with self.assertRaises(KeyError):
+        with self.assertRaises(RuntimeError):
             self.heartbeater.schedule()
 
         self.assertFalse(self.clock.getDelayedCalls())
@@ -62,6 +62,7 @@ class HeartbeatClockTestCase(unittest.TestCase):
         self.assertEqual(self.heartbeats, 1)
 
         rescheduledPendingBeat = self.heartbeater.pendingHeartbeat
+        self.assertIsNot(pendingBeat, rescheduledPendingBeat)
         self.assertEqual(self.clock.getDelayedCalls(),
                          [rescheduledPendingBeat])
 
@@ -79,7 +80,6 @@ class HeartbeatClockTestCase(unittest.TestCase):
         self.assertFalse(self.heartbeats)
 
         rescheduledPendingBeat = self.heartbeater.pendingHeartbeat
-        self.assertIsNot(pendingBeat, rescheduledPendingBeat)
         self.assertEqual(self.clock.getDelayedCalls(),
                          [rescheduledPendingBeat])
 
@@ -92,6 +92,151 @@ class HeartbeatClockTestCase(unittest.TestCase):
         self.heartbeater.stop()
         self.assertFalse(self.heartbeats)
         self.assertFalse(self.clock.getDelayedCalls())
+
+        # this does not raise an exception
+        self.heartbeater.stop()
+
+
+class TestProtocol(Protocol):
+    connectionMadeCalls = 0
+
+    def connectionMade(self):
+        self.connectionMadeCalls += 1
+        if self.connectionMadeCalls > 1:
+            assert False, "connectionMade must only be called once"
+
+
+class RecordingProtocol(Protocol):
+
+    def dataReceived(self, data):
+        self.factory.receivedData.append(data)
+
+
+class RecordingProtocolFactory(Factory):
+    protocol = RecordingProtocol
+
+    def __init__(self, receivedData):
+        self.receivedData = receivedData
+
+
+class EchoProtocol(TestProtocol):
+
+    def dataReceived(self, data):
+        if isinstance(data, list):
+            self.transport.writeSequence(data)
+        else:
+            self.transport.write(data)
+
+
+class SockJSWireProtocolWrapperTestCase(unittest.TestCase):
+    '''Sanity tests for SockJS transport base class.'''
+
+    def setUp(self):
+        self.transport = StringTransport()
+
+        self.receivedData = []
+        self.wrappedFactory = RecordingProtocolFactory(self.receivedData)
+        self.factory = P.SockJSWireProtocolWrappingFactory(
+            self.wrappedFactory)
+
+        self.address = IPv4Address('TCP', '127.0.0.1', 80)
+
+        self.protocol = self.factory.buildProtocol(self.address)
+        self.protocol.makeConnection(self.transport)
+
+    def test_writeOpen(self):
+        '''writeOpen writes a single open frame.'''
+        self.protocol.writeOpen()
+        self.assertEqual(self.transport.value(), b'o\n')
+
+    def test_writeHeartbeat(self):
+        '''writeHeartbeat writes a single heartbeat frame.'''
+        self.protocol.writeHeartbeat()
+        self.assertEqual(self.transport.value(), b'h\n')
+
+    def test_writeClose(self):
+        '''writeClose writes a close frame containing the provided reason.'''
+        self.protocol.writeClose(P.DISCONNECT.GO_AWAY)
+        self.assertEqual(self.transport.value(), b'c[3000,"Go away!"]\n')
+
+    def test_writeData(self):
+        '''writeData writes the provided data to the transport.'''
+        self.protocol.writeData(["letter", 2])
+        self.assertEqual(self.transport.value(), b'a["letter",2]\n')
+
+    def test_dataReceived(self):
+        '''The wrapped protocol receives deserialized JSON data.'''
+        self.protocol.dataReceived(b'["letter",2]')
+        self.protocol.dataReceived(b'["another",null]')
+        self.assertEqual(self.receivedData, [["letter", 2],
+                                             ["another", None]])
+
+    def test_emptyDataReceived(self):
+        '''The wrapped protocol does not receive empty strings and the sender
+        receives an error message.
+
+        '''
+        self.protocol.dataReceived(b'')
+        self.assertFalse(self.receivedData)
+        self.assertEqual(self.transport.value(),
+                         P.INVALID_DATA.NO_PAYLOAD.value)
+
+    def test_badJSONReceived(self):
+        '''The wrapped protocol does not receive malform JSON and the sender
+        receives an error message.
+
+        '''
+        self.protocol.dataReceived(b'!!!')
+        self.assertFalse(self.receivedData)
+        self.assertEqual(self.transport.value(),
+                         P.INVALID_DATA.BAD_JSON.value)
+
+    def test_jsonEncoder(self):
+        '''SockJSWireProtocolWrapper can use a json.JSONEncoder subclass for writes.
+
+        '''
+        class ComplexEncoder(json.JSONEncoder):
+            def default(self, obj):
+                if isinstance(obj, complex):
+                    return [obj.real, obj.imag]
+                # Let the base class default method raise the TypeError
+                return json.JSONEncoder.default(self, obj)
+
+        factory = P.SockJSWireProtocolWrappingFactory(
+            self.wrappedFactory,
+            jsonEncoder=ComplexEncoder)
+
+        encodingProtocol = factory.buildProtocol(self.address)
+        encodingProtocol.makeConnection(self.transport)
+
+        encodingProtocol.writeData([2 + 1j])
+
+        self.assertEqual(self.transport.value(), b'a[[2.0,1.0]]\n')
+
+    def test_jsonDecoder(self):
+        '''SockJSWireProtocolWrapper can use a json.JSONDecoder subclass for
+        receives.
+
+        '''
+        class SetDecoder(json.JSONDecoder):
+            def __init__(self, *args, **kwargs):
+                kwargs['object_hook'] = self.set_object_hook
+                super(SetDecoder, self).__init__(*args, **kwargs)
+
+            def set_object_hook(self, obj):
+                if isinstance(obj, dict) and obj.get('!set'):
+                    return set(obj['!set'])
+                return obj
+
+        factory = P.SockJSWireProtocolWrappingFactory(
+            self.wrappedFactory,
+            jsonDecoder=SetDecoder)
+
+        encodingProtocol = factory.buildProtocol(self.address)
+        encodingProtocol.makeConnection(self.transport)
+
+        encodingProtocol.dataReceived(b'{"!set": [1, 2, 3]}')
+        self.assertEqual(self.receivedData, [{1, 2, 3}])
 
 
 class RecordsHeartbeat(object):
@@ -120,7 +265,7 @@ class FakeHeartbeatClock(object):
         self._recorder.stopCalled()
 
 
-class SockJSProtocolStateMachineTestCase(unittest.TestCase):
+class SockJSProtocolMachineTestCase(unittest.TestCase):
 
     def setUp(self):
         self.heartbeatRecorder = RecordsHeartbeat()
@@ -202,66 +347,6 @@ class SockJSProtocolStateMachineTestCase(unittest.TestCase):
         self.assertTrue(self.transport.value(), expectedProtocolTrace)
         self.assertTrue(self.heartbeatRecorder.stopCalls)
 
-    def test_jsonEncoder(self):
-        '''SockJSProtocolMachine can use a json.JSONEncoder subclass for
-        writes.
-
-        '''
-        class ComplexEncoder(json.JSONEncoder):
-            def default(self, obj):
-                if isinstance(obj, complex):
-                    return [obj.real, obj.imag]
-                # Let the base class default method raise the TypeError
-                return json.JSONEncoder.default(self, obj)
-
-        encodingSockJSMachine = P.SockJSProtocolMachine(
-            self.heartbeater,
-            jsonEncoder=ComplexEncoder)
-
-        encodingSockJSMachine.connect(self.transport)
-        encodingSockJSMachine.write([2 + 1j])
-
-        expectedProtocolTrace = b''.join([b'o', b'a[[2.0,1.0]]'])
-        self.assertEqual(self.transport.value(), expectedProtocolTrace)
-
-    def test_jsonDecoder(self):
-        '''SockJSProtocolMachine can use a json.JSONDecoder subclass for
-        receives.
-
-        '''
-        class SetDecoder(json.JSONDecoder):
-            def __init__(self, *args, **kwargs):
-                kwargs['object_hook'] = self.set_object_hook
-                super(SetDecoder, self).__init__(*args, **kwargs)
-
-            def set_object_hook(self, obj):
-                if isinstance(obj, dict) and obj.get('!set'):
-                    return set(obj['!set'])
-                return obj
-
-        decodingSockJSMachine = P.SockJSProtocolMachine(
-            self.heartbeater,
-            jsonDecoder=SetDecoder)
-
-        decodingSockJSMachine.connect(self.transport)
-        result = decodingSockJSMachine.receive(b'{"!set": [1, 2, 3]}')
-        self.assertEqual(result, {1, 2, 3})
-
-
-class EchoProtocol(Protocol):
-    connectionMadeCalls = 0
-
-    def connectionMade(self):
-        self.connectionMadeCalls += 1
-        if self.connectionMadeCalls > 1:
-            assert False, "connectionMade must only be called once"
-
-    def dataReceived(self, data):
-        if isinstance(data, list):
-            self.transport.writeSequence(data)
-        else:
-            self.transport.write(data)
-
 
 class SockJSProtocolTestCase(unittest.TestCase):
 
@@ -290,13 +375,6 @@ class SockJSProtocolTestCase(unittest.TestCase):
         self.protocol.loseConnection()
         expectedProtocolTrace = b''.join([b'o', b'c[3000,"Go away!"]'])
         self.assertEqual(self.transport.value(), expectedProtocolTrace)
-
-
-class TestFactoryForRequestSessionProtocol(WrappingFactory):
-    '''
-    A factory for testing RequestSessionProtocol
-    '''
-    protocol = P._RequestSessionProtocol
 
 
 class RequestSessionProtocolTestCase(unittest.TestCase):
@@ -468,27 +546,8 @@ class TimeoutClockTestCase(unittest.TestCase):
         self.length = 5.0
         self.timedOut = False
 
-        def fakeTerminateSession():
-            self.timedOut = True
-
-        self.timeout = P.TimeoutClock(fakeTerminateSession,
-                                      length=self.length,
-                                      clock=self.clock)
-
-    def test_neverScheduled(self):
-        '''Timeouts are not scheduled before their first start(), and are not
-        scheduled if we immediately expire() the TimeoutClock.  A stopped
-        TimeoutClock can never schedule another timeout.
-
-        '''
-        self.assertFalse(self.clock.getDelayedCalls())
-        self.timeout.expire()
-        self.assertFalse(self.clock.getDelayedCalls())
-
-        with self.assertRaises(KeyError):
-            self.timeout.reset()
-
-        self.assertFalse(self.clock.getDelayedCalls())
+        self.timeoutClock = P.TimeoutClock(length=self.length,
+                                           clock=self.clock)
 
     def test_start(self):
         '''A timeout expires a connection if not interrupted and then
@@ -496,35 +555,42 @@ class TimeoutClockTestCase(unittest.TestCase):
 
         '''
 
-        self.timeout.start()
+        self.timeoutClock.start()
+        terminationDeferred = self.timeoutClock.terminated
 
-        pendingExpiration = self.timeout.timeout
+        pendingExpiration = self.timeoutClock.timeoutCall
         self.assertFalse(self.timedOut)
         self.assertEqual(self.clock.getDelayedCalls(), [pendingExpiration])
 
         self.clock.advance(self.length * 2)
-        self.assertTrue(self.timedOut)
 
-        self.assertIsNone(self.timeout.timeout)
+        def assertTimedOutAndCannotRestart(_):
+            self.assertFalse(self.clock.getDelayedCalls())
 
-        with self.assertRaises(KeyError):
-            self.timeout.start()
+            self.assertTrue(self.timedOut)
 
-        with self.assertRaises(KeyError):
-            self.timeout.reset()
+            self.assertIsNone(self.timeoutClock.timeoutCall)
+
+            with self.assertRaises(RuntimeError):
+                self.timeoutClock.start()
+
+            with self.assertRaises(RuntimeError):
+                self.timeoutClock.reset()
+
+        terminationDeferred.addCallback(assertTimedOutAndCannotRestart)
 
     def test_reset_interrupts(self):
-        '''A reset() call will remove the pending timeout and reschedule it
-        for later.
+        '''A reset() call will remove the pending timeout, so that a
+        subsequent start() call reschedule it.
 
         '''
-        self.timeout.start()
+        self.timeoutClock.start()
 
-        pendingExpiration = self.timeout.timeout
+        pendingExpiration = self.timeoutClock.timeoutCall
         self.assertEqual(self.clock.getDelayedCalls(), [pendingExpiration])
 
-        self.timeout.reset()
+        self.timeoutClock.reset()
 
-        resetPendingExecution = self.timeout.timeout
+        resetPendingExecution = self.timeoutClock.timeoutCall
         self.assertIsNot(pendingExpiration, resetPendingExecution)
         self.assertEqual(self.clock.getDelayedCalls(), [])
