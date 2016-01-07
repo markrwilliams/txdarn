@@ -8,6 +8,6 @@ setup(name='txdarn',
       install_requires=['Twisted>=15.4.0',
                         'eliot',
                         'six',
-                        'txWS',
+                        'autobahn',
                         'klein',
                         'automat'])

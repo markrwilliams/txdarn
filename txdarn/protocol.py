@@ -292,7 +292,7 @@ class SockJSProtocol(ProtocolWrapper):
         self.sockJSMachine.connect(self.transport)
 
     def dataReceived(self, data):
-        data = self.sockJSMachine.receive(data)
+        self.sockJSMachine.receive(data)
         self.wrappedProtocol.dataReceived(data)
 
     def write(self, data):
@@ -339,10 +339,9 @@ class RequestSessionMachine(object):
     _machine = MethodicalMachine()
     _closeReason = None
 
-    def __init__(self, requestSession, firstConnectionAttached=True):
+    def __init__(self, requestSession):
         self.buffer = []
         self.requestSession = requestSession
-        self.firstConnectionAttached = firstConnectionAttached
 
     @_machine.state(initial=True)
     def neverConnected(self):
@@ -425,7 +424,14 @@ class RequestSessionMachine(object):
     @_machine.output()
     def _completeConnection(self, request):
         self.requestSession.completeConnection(request)
-        return self.firstConnectionAttached
+
+    @_machine.output()
+    def _beginFirstRequest(self, request):
+        self.requestSession.beginFirstRequest()
+
+    @_machine.output()
+    def _beginRequest(self, request):
+        self.requestSession.beginRequest()
 
     @_machine.output()
     def _bufferWrite(self, data):
@@ -505,8 +511,8 @@ class RequestSessionMachine(object):
     neverConnected.upon(attach,
                         enter=connectedHaveTransport,
                         outputs=[_openRequest,
-                                 _completeConnection],
-                        collector=_returnLastValue)
+                                 _completeConnection,
+                                 _beginFirstRequest])
 
     connectedHaveTransport.upon(write,
                                 enter=connectedHaveTransport,
@@ -519,8 +525,7 @@ class RequestSessionMachine(object):
                                 outputs=[_closeRequest])
     connectedHaveTransport.upon(attach,
                                 enter=connectedHaveTransport,
-                                outputs=[_closeDuplicateRequest],
-                                collector=_makeCollectAndReturn(False))
+                                outputs=[_closeDuplicateRequest])
     connectedHaveTransport.upon(writeClose,
                                 enter=connectedHaveTransport,
                                 outputs=[_storeCloseReason])
@@ -540,8 +545,8 @@ class RequestSessionMachine(object):
                                          outputs=[])
     connectedNoTransportEmptyBuffer.upon(attach,
                                          enter=connectedHaveTransport,
-                                         outputs=[_openRequest],
-                                         collector=_makeCollectAndReturn(True))
+                                         outputs=[_openRequest,
+                                                  _beginRequest])
     connectedNoTransportEmptyBuffer.upon(detach,
                                          enter=connectedNoTransportEmptyBuffer,
                                          outputs=[])
@@ -557,8 +562,7 @@ class RequestSessionMachine(object):
 
     loseConnectionEmptyBuffer.upon(attach,
                                    enter=loseConnectionEmptyBuffer,
-                                   outputs=[_writeCloseReason],
-                                   collector=_makeCollectAndReturn(False))
+                                   outputs=[_writeCloseReason])
     loseConnectionEmptyBuffer.upon(connectionLost,
                                    enter=disconnected,
                                    outputs=[_closeProtocol])
@@ -572,8 +576,7 @@ class RequestSessionMachine(object):
     connectedNoTransportPending.upon(attach,
                                      enter=connectedHaveTransport,
                                      outputs=[_openRequest,
-                                              _flushBuffer],
-                                     collector=_makeCollectAndReturn(True))
+                                              _flushBuffer])
     connectedNoTransportPending.upon(detach,
                                      enter=connectedNoTransportPending,
                                      outputs=[])
@@ -593,17 +596,14 @@ class RequestSessionMachine(object):
                                outputs=[_timedOut])
     loseConnectionPending.upon(attach,
                                enter=loseConnectionPending,
-                               outputs=[_writeCloseReason],
-                               collector=_makeCollectAndReturn(False))
-
+                               outputs=[_writeCloseReason])
     loseConnectionPending.upon(detach,
                                enter=loseConnectionPending,
                                outputs=[])
 
     disconnected.upon(attach,
                       enter=disconnected,
-                      outputs=[_closeRequestForDeadSession],
-                      collector=_makeCollectAndReturn(False))
+                      outputs=[_closeRequestForDeadSession])
     disconnected.upon(heartbeat,
                       enter=disconnected,
                       outputs=[])
@@ -679,15 +679,10 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
         return self.request is not None
 
     def makeConnectionFromRequest(self, request):
-        if self.sessionMachine.attach(request):
-            self.finishedNotifier = self.request.notifyFinish()
-            self.finishedNotifier.addErrback(_trapCancellation)
-            self.finishedNotifier.addErrback(self.connectionLost)
-            self.timeoutClock.reset()
+        self.sessionMachine.attach(request)
 
     def detachFromRequest(self):
         self.sessionMachine.detach()
-        self.timeoutClock.start()
 
     def write(self, data):
         self.request.write(data)
@@ -725,6 +720,14 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
     def completeConnection(self, request):
         ProtocolWrapper.makeConnection(self, request.transport)
 
+    def beginRequest(self):
+        self.finishedNotifier = self.request.notifyFinish()
+        self.finishedNotifier.addErrback(_trapCancellation)
+        self.finishedNotifier.addErrback(self.connectionLost)
+        self.timeoutClock.reset()
+
+    beginFirstRequest = beginRequest
+
     def completeWrite(self, data):
         SockJSWireProtocolWrapper.writeData(self, data)
 
@@ -743,6 +746,7 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
         self.request.finish()
         self.request = None
         self.finishedNotifier = None
+        self.timeoutClock.start()
 
 
 class RequestSessionWrappingFactory(SockJSWireProtocolWrappingFactory):
@@ -809,13 +813,12 @@ class SessionHouse(object):
 
 class XHRSession(RequestSessionProtocolWrapper):
 
-    def __init__(self, *args, **kwargs):
-        RequestSessionProtocolWrapper.__init__(self, *args, **kwargs)
-        self.sessionMachine.firstConnectionAttached = False
-
     def writeOpen(self):
         RequestSessionProtocolWrapper.writeOpen(self)
         self.detachFromRequest()
+
+    def beginFirstRequest(self):
+        pass
 
     def writeData(self, data):
         RequestSessionProtocolWrapper.writeData(self, data)
