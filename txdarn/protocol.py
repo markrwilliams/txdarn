@@ -398,6 +398,10 @@ class RequestSessionMachine(object):
         '''The protocol wants to write to the transport.'''
 
     @_machine.input()
+    def receive(self, data):
+        '''The underlying transport wants to us to receive some data.'''
+
+    @_machine.input()
     def writeClose(self, reason):
         '''The protocol wants to close the session for reason'''
 
@@ -432,6 +436,10 @@ class RequestSessionMachine(object):
     @_machine.output()
     def _beginRequest(self, request):
         self.requestSession.beginRequest()
+
+    @_machine.output()
+    def _completeDataReceived(self, data):
+        self.requestSession.completeDataReceived(data)
 
     @_machine.output()
     def _bufferWrite(self, data):
@@ -517,6 +525,9 @@ class RequestSessionMachine(object):
     connectedHaveTransport.upon(write,
                                 enter=connectedHaveTransport,
                                 outputs=[_directWrite])
+    connectedHaveTransport.upon(receive,
+                                enter=connectedHaveTransport,
+                                outputs=[_completeDataReceived])
     connectedHaveTransport.upon(heartbeat,
                                 enter=connectedHaveTransport,
                                 outputs=[_directHeartbeat])
@@ -540,6 +551,9 @@ class RequestSessionMachine(object):
     connectedNoTransportEmptyBuffer.upon(write,
                                          enter=connectedNoTransportPending,
                                          outputs=[_bufferWrite])
+    connectedNoTransportEmptyBuffer.upon(receive,
+                                         enter=connectedNoTransportPending,
+                                         outputs=[_completeDataReceived])
     connectedNoTransportEmptyBuffer.upon(heartbeat,
                                          enter=connectedNoTransportEmptyBuffer,
                                          outputs=[])
@@ -563,6 +577,9 @@ class RequestSessionMachine(object):
     loseConnectionEmptyBuffer.upon(attach,
                                    enter=loseConnectionEmptyBuffer,
                                    outputs=[_writeCloseReason])
+    loseConnectionEmptyBuffer.upon(receive,
+                                   enter=loseConnectionEmptyBuffer,
+                                   outputs=[])
     loseConnectionEmptyBuffer.upon(connectionLost,
                                    enter=disconnected,
                                    outputs=[_closeProtocol])
@@ -570,6 +587,9 @@ class RequestSessionMachine(object):
     connectedNoTransportPending.upon(write,
                                      enter=connectedNoTransportPending,
                                      outputs=[_bufferWrite])
+    connectedNoTransportPending.upon(receive,
+                                     enter=connectedNoTransportPending,
+                                     outputs=[_completeDataReceived])
     connectedNoTransportPending.upon(heartbeat,
                                      enter=connectedNoTransportPending,
                                      outputs=[])
@@ -597,6 +617,9 @@ class RequestSessionMachine(object):
     loseConnectionPending.upon(attach,
                                enter=loseConnectionPending,
                                outputs=[_writeCloseReason])
+    loseConnectionPending.upon(receive,
+                               enter=loseConnectionPending,
+                               outputs=[])
     loseConnectionPending.upon(detach,
                                enter=loseConnectionPending,
                                outputs=[])
@@ -604,6 +627,9 @@ class RequestSessionMachine(object):
     disconnected.upon(attach,
                       enter=disconnected,
                       outputs=[_closeRequestForDeadSession])
+    disconnected.upon(receive,
+                      enter=disconnected,
+                      outputs=[])
     disconnected.upon(heartbeat,
                       enter=disconnected,
                       outputs=[])
@@ -687,6 +713,9 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
     def write(self, data):
         self.request.write(data)
 
+    def dataReceived(self, data):
+        self.sessionMachine.receive(data)
+
     def writeData(self, data):
         self.sessionMachine.write(data)
 
@@ -730,6 +759,9 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
 
     def completeWrite(self, data):
         SockJSWireProtocolWrapper.writeData(self, data)
+
+    def completeDataReceived(self, data):
+        SockJSWireProtocolWrapper.dataReceived(self, data)
 
     def completeHeartbeat(self):
         SockJSWireProtocolWrapper.writeHeartbeat(self)
