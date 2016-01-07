@@ -40,12 +40,17 @@ class TxDarn(object):
     with app.subroute('/<serverID>/<sessionID>') as sessionApp:
         @sessionApp.route('/xhr')
         def xhr(self, request, serverID, sessionID):
-            self._sessions.attachToSession(sessionID, request)
+            if not self._sessions.attachToSession(serverID,
+                                                  sessionID,
+                                                  request):
+                request.setResponseCode(404)
+                return b''
             return request.notifyFinish()
 
         @sessionApp.route('/xhr_send')
         def xhr_send(self, request, serverID, sessionID):
-            if self._sessions.writeToSession(sessionID,
+            if self._sessions.writeToSession(serverID,
+                                             sessionID,
                                              request.content.read()):
                 request.setResponseCode(204)
             else:

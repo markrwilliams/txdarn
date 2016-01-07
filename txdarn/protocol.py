@@ -8,6 +8,8 @@ from twisted.internet import reactor, protocol, error
 from twisted.python import failure
 from twisted.protocols.policies import ProtocolWrapper, WrappingFactory
 
+from zope.interface import directlyProvides, providedBy
+
 from txdarn.compat import asJSON, fromJSON
 
 
@@ -405,12 +407,12 @@ class RequestSessionMachine(object):
         self.requestSession.request = request
 
     @_machine.output()
-    def _completeConnection(self, request):
-        self.requestSession.completeConnection(request)
+    def _establishConnection(self, request):
+        self.requestSession.establishConnection(request)
 
     @_machine.output()
-    def _beginFirstRequest(self, request):
-        self.requestSession.beginFirstRequest()
+    def _completeConnection(self, request):
+        self.requestSession.completeConnection(request)
 
     @_machine.output()
     def _beginRequest(self, request):
@@ -498,8 +500,9 @@ class RequestSessionMachine(object):
     neverConnected.upon(attach,
                         enter=connectedHaveTransport,
                         outputs=[_openRequest,
-                                 _completeConnection,
-                                 _beginFirstRequest])
+                                 _establishConnection,
+                                 _beginRequest,
+                                 _completeConnection])
 
     connectedHaveTransport.upon(write,
                                 enter=connectedHaveTransport,
@@ -725,16 +728,19 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
         self.sessionMachine.connectionLost(reason)
         self.sessionMachine = None
 
-    def completeConnection(self, request):
-        ProtocolWrapper.makeConnection(self, request.transport)
-
     def beginRequest(self):
         self.finishedNotifier = self.request.notifyFinish()
         self.finishedNotifier.addErrback(_trapCancellation)
         self.finishedNotifier.addErrback(self.connectionLost)
         self.timeoutClock.reset()
 
-    beginFirstRequest = beginRequest
+    def establishConnection(self, request):
+        directlyProvides(self, providedBy(request.transport))
+        protocol.Protocol.makeConnection(self, request.transport)
+        self.factory.registerProtocol(self)
+
+    def completeConnection(self, request):
+        self.wrappedProtocol.makeConnection(self)
 
     def completeWrite(self, data):
         SockJSWireProtocolWrapper.writeData(self, data)
@@ -778,6 +784,9 @@ class SessionHouse(object):
         self.timeoutFactory = timeoutFactory
         self.sessions = {}
 
+    def isValidID(self, identifier):
+        return not '.' in identifier
+
     def makeSession(self, sessionID, request):
         terminationDeferred = defer.Deferred()
 
@@ -805,14 +814,21 @@ class SessionHouse(object):
             protocol.disconnecting = 1
             protocol.connectionLost()
 
-    def attachToSession(self, sessionID, request):
+    def attachToSession(self, serverID, sessionID, request):
+        if not (self.isValidID(serverID) and self.isValidID(sessionID)):
+            return False
+
         session = self.sessions.get(sessionID)
         if not session:
             session = self.sessions[sessionID] = self.makeSession(sessionID,
                                                                   request)
         session.makeConnectionFromRequest(request)
+        return True
 
-    def writeToSession(self, sessionID, data):
+    def writeToSession(self, serverID, sessionID, data):
+        if not (self.isValidID(serverID) and self.isValidID(sessionID)):
+            return False
+
         try:
             session = self.sessions[sessionID]
         except KeyError:
@@ -827,9 +843,6 @@ class XHRSession(RequestSessionProtocolWrapper):
     def writeOpen(self):
         RequestSessionProtocolWrapper.writeOpen(self)
         self.detachFromRequest()
-
-    def beginFirstRequest(self):
-        pass
 
     def writeData(self, data):
         RequestSessionProtocolWrapper.writeData(self, data)
