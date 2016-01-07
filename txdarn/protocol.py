@@ -116,10 +116,6 @@ class SockJSProtocolMachine(object):
         '''We have a connection!'''
 
     @_machine.state()
-    def disconnecting(self):
-        '''We've asked to be disconnected.'''
-
-    @_machine.state()
     def disconnected(self):
         '''We have been disconnected.'''
 
@@ -186,6 +182,12 @@ class SockJSProtocolMachine(object):
         self.heartbeater.stop()
         self.heartbeater = None
 
+    @_machine.output()
+    def _stopHeartbeatWithReason(self, reason=DISCONNECT.GO_AWAY):
+        '''We lost our connection - stop our heartbeat.'''
+        self.heartbeater.stop()
+        self.heartbeater = None
+
     notYetConnected.upon(connect,
                          enter=connected,
                          outputs=[_connectionEstablished])
@@ -205,16 +207,13 @@ class SockJSProtocolMachine(object):
                    enter=connected,
                    outputs=[_writeHeartbeatToTransport])
     connected.upon(disconnect,
-                   enter=disconnecting,
-                   outputs=[_writeCloseFrame])
+                   enter=disconnected,
+                   outputs=[_writeCloseFrame,
+                            _stopHeartbeatWithReason])
 
     connected.upon(close,
                    enter=disconnected,
                    outputs=[_stopHeartbeat])
-
-    disconnecting.upon(close,
-                       enter=disconnected,
-                       outputs=[_stopHeartbeat])
 
 
 class SockJSWireProtocolWrapper(ProtocolWrapper):
@@ -338,6 +337,7 @@ class SessionTimeout(Exception):
 
 class RequestSessionMachine(object):
     _machine = MethodicalMachine()
+    _closeReason = None
 
     def __init__(self, requestSession, firstConnectionAttached=True):
         self.buffer = []
@@ -399,6 +399,10 @@ class RequestSessionMachine(object):
         '''The protocol wants to write to the transport.'''
 
     @_machine.input()
+    def writeClose(self, reason):
+        '''The protocol wants to close the session for reason'''
+
+    @_machine.input()
     def heartbeat(self):
         '''The protocol wants to send a heartbeat.'''
 
@@ -436,6 +440,11 @@ class RequestSessionMachine(object):
         self.buffer = []
 
     @_machine.output()
+    def _dumpBuffer(self):
+        '''Forget the contents of the buffer.'''
+        self.buffer = []
+
+    @_machine.output()
     def _directWrite(self, data):
         '''Skip our buffer'''
         self.requestSession.completeWrite(data)
@@ -463,6 +472,16 @@ class RequestSessionMachine(object):
     @_machine.output()
     def _loseConnection(self):
         self.requestSession.completeLoseConnection()
+
+    @_machine.output()
+    def _storeCloseReason(self, reason):
+        self._closeReason = reason
+
+    @_machine.output()
+    def _writeCloseReason(self, request):
+        if self._closeReason:
+            request.write(self.requestSession.closeFrame(self._closeReason))
+        request.finish()
 
     @_machine.output()
     def _closeProtocol(self, reason=protocol.connectionDone):
@@ -502,6 +521,13 @@ class RequestSessionMachine(object):
                                 enter=connectedHaveTransport,
                                 outputs=[_closeDuplicateRequest],
                                 collector=_makeCollectAndReturn(False))
+    connectedHaveTransport.upon(writeClose,
+                                enter=connectedHaveTransport,
+                                outputs=[_storeCloseReason])
+    connectedHaveTransport.upon(loseConnection,
+                                enter=loseConnectionEmptyBuffer,
+                                outputs=[_closeRequest,
+                                         _loseConnection])
     connectedHaveTransport.upon(connectionLost,
                                 enter=disconnected,
                                 outputs=[_timedOut])
@@ -519,20 +545,23 @@ class RequestSessionMachine(object):
     connectedNoTransportEmptyBuffer.upon(detach,
                                          enter=connectedNoTransportEmptyBuffer,
                                          outputs=[])
+    connectedNoTransportEmptyBuffer.upon(writeClose,
+                                         enter=connectedNoTransportEmptyBuffer,
+                                         outputs=[_storeCloseReason])
     connectedNoTransportEmptyBuffer.upon(loseConnection,
                                          enter=loseConnectionEmptyBuffer,
-                                         outputs=[])
+                                         outputs=[_loseConnection])
     connectedNoTransportEmptyBuffer.upon(connectionLost,
                                          enter=disconnected,
                                          outputs=[_closeProtocol])
-    # this is a separate state so we can't attach a request after
-    # we've called loseConnection
+
+    loseConnectionEmptyBuffer.upon(attach,
+                                   enter=loseConnectionEmptyBuffer,
+                                   outputs=[_writeCloseReason],
+                                   collector=_makeCollectAndReturn(False))
     loseConnectionEmptyBuffer.upon(connectionLost,
                                    enter=disconnected,
                                    outputs=[_closeProtocol])
-    loseConnectionEmptyBuffer.upon(detach,
-                                   enter=loseConnectionEmptyBuffer,
-                                   outputs=[])
 
     connectedNoTransportPending.upon(write,
                                      enter=connectedNoTransportPending,
@@ -548,17 +577,24 @@ class RequestSessionMachine(object):
     connectedNoTransportPending.upon(detach,
                                      enter=connectedNoTransportPending,
                                      outputs=[])
+    connectedNoTransportPending.upon(writeClose,
+                                     enter=connectedNoTransportPending,
+                                     outputs=[_storeCloseReason])
     connectedNoTransportPending.upon(loseConnection,
                                      enter=loseConnectionPending,
-                                     outputs=[])
+                                     outputs=[_dumpBuffer,
+                                              _loseConnection])
     connectedNoTransportPending.upon(connectionLost,
                                      enter=disconnected,
                                      outputs=[_timedOut])
-    # this is a separate state so we can't attach a request after
-    # we've called loseConnection
+
     loseConnectionPending.upon(connectionLost,
                                enter=disconnected,
                                outputs=[_timedOut])
+    loseConnectionPending.upon(attach,
+                               enter=loseConnectionPending,
+                               outputs=[_writeCloseReason],
+                               collector=_makeCollectAndReturn(False))
 
     loseConnectionPending.upon(detach,
                                enter=loseConnectionPending,
@@ -662,6 +698,9 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
     def writeHeartbeat(self):
         self.sessionMachine.heartbeat()
 
+    def writeClose(self, reason):
+        self.sessionMachine.writeClose(reason)
+
     def loseConnection(self):
         if not self.disconnecting:
             self.disconnecting = 1
@@ -695,7 +734,7 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
     def completeConnectionLost(self, reason):
         SockJSWireProtocolWrapper.connectionLost(self, reason)
 
-    def completeLoseConnection(self, reason):
+    def completeLoseConnection(self):
         SockJSWireProtocolWrapper.loseConnection(self)
 
     def finishCurrentRequest(self):
