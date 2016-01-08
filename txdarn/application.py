@@ -1,6 +1,6 @@
-from twisted.web.server import NOT_DONE_YET
 from txdarn import resources as R
 from txdarn import protocol as P
+from txdarn import compat
 
 import klein
 
@@ -23,6 +23,8 @@ class TxDarn(object):
         self._xhrFactory = P.XHRSessionFactory(self._sockJSFactory)
         self._sessions = P.SessionHouse(self._xhrFactory,
                                         self.config['timeout'])
+        self._xhrResource = R.XHRResource(self._sessions)
+        self._xhrSendResource = R.XHRSendResource(self._sessions)
 
     @app.route('/', strict_slashes=False)
     def greeting(self, request):
@@ -40,19 +42,14 @@ class TxDarn(object):
     with app.subroute('/<serverID>/<sessionID>') as sessionApp:
         @sessionApp.route('/xhr')
         def xhr(self, request, serverID, sessionID):
-            if not self._sessions.attachToSession(serverID,
-                                                  sessionID,
-                                                  request):
-                request.setResponseCode(404)
-                return b''
-            return request.notifyFinish()
+            request.postpath = [compat.networkString(serverID),
+                                compat.networkString(sessionID),
+                                b'xhr']
+            return self._xhrResource
 
         @sessionApp.route('/xhr_send')
         def xhr_send(self, request, serverID, sessionID):
-            if self._sessions.writeToSession(serverID,
-                                             sessionID,
-                                             request.content.read()):
-                request.setResponseCode(204)
-            else:
-                request.setResponseCode(404)
-            return ''
+            request.postpath = [compat.networkString(serverID),
+                                compat.networkString(sessionID),
+                                b'xhr_send']
+            return self._xhrSendResource

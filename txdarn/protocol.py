@@ -13,6 +13,10 @@ from zope.interface import directlyProvides, providedBy
 from txdarn.compat import asJSON, fromJSON
 
 
+class TxDarnProtocolException(Exception):
+    '''Raised when a protocol-level error occurs'''
+
+
 def _trapCancellation(failure):
     failure.trap(defer.CancelledError)
 
@@ -23,8 +27,8 @@ def sockJSJSON(data, cls=None):
 
 
 class INVALID_DATA(Values):
-    NO_PAYLOAD = ValueConstant(b'Payload expected.')
-    BAD_JSON = ValueConstant(b'Broken JSON encoding. ')
+    NO_PAYLOAD = ValueConstant(b'Payload expected.\n')
+    BAD_JSON = ValueConstant(b'Broken JSON encoding.\n')
 
 
 class DISCONNECT(Values):
@@ -197,6 +201,15 @@ class SockJSProtocolMachine(object):
                    outputs=[_stopHeartbeat])
 
 
+class InvalidData(TxDarnProtocolException):
+    '''Received invalid JSON.'''
+
+    def __init__(self, reason):
+        super(InvalidData, self).__init__(
+            "Could not decode data: {!r}".format(reason))
+        self.reason = reason
+
+
 class SockJSWireProtocolWrapper(ProtocolWrapper):
     '''Serialize and deserialize SockJS protocol elements.  Used as a
     base class for various transports.
@@ -213,12 +226,14 @@ class SockJSWireProtocolWrapper(ProtocolWrapper):
 
     def dataReceived(self, data):
         if not data:
-            self.transport.write(INVALID_DATA.NO_PAYLOAD.value)
+            raise InvalidData(INVALID_DATA.NO_PAYLOAD.value)
         else:
             try:
-                self._jsonReceived(fromJSON(data, cls=self.jsonDecoder))
+                decoded = fromJSON(data, cls=self.jsonDecoder)
             except ValueError:
-                self.transport.write(INVALID_DATA.BAD_JSON.value)
+                raise InvalidData(INVALID_DATA.BAD_JSON.value)
+            else:
+                self._jsonReceived(decoded)
 
     def writeOpen(self):
         '''Write an open frame.'''
@@ -273,7 +288,7 @@ class SockJSProtocol(ProtocolWrapper):
         self.sockJSMachine.connect(self.transport)
 
     def dataReceived(self, data):
-        self.sockJSMachine.receive(data)
+        data = self.sockJSMachine.receive(data)
         self.wrappedProtocol.dataReceived(data)
 
     def write(self, data):
@@ -491,12 +506,6 @@ class RequestSessionMachine(object):
         self.requestSession.completeConnectionLost(reason=reason)
         self.requestSession = None
 
-    neverConnected.upon(write,
-                        enter=connectedNoTransportPending,
-                        outputs=[_bufferWrite])
-    neverConnected.upon(heartbeat,
-                        enter=neverConnected,
-                        outputs=[])
     neverConnected.upon(attach,
                         enter=connectedHaveTransport,
                         outputs=[_openRequest,
@@ -534,7 +543,7 @@ class RequestSessionMachine(object):
                                          enter=connectedNoTransportPending,
                                          outputs=[_bufferWrite])
     connectedNoTransportEmptyBuffer.upon(receive,
-                                         enter=connectedNoTransportPending,
+                                         enter=connectedNoTransportEmptyBuffer,
                                          outputs=[_completeDataReceived])
     connectedNoTransportEmptyBuffer.upon(heartbeat,
                                          enter=connectedNoTransportEmptyBuffer,
@@ -784,8 +793,17 @@ class SessionHouse(object):
         self.timeoutFactory = timeoutFactory
         self.sessions = {}
 
-    def isValidID(self, identifier):
-        return not '.' in identifier
+    def validateAndExtractSessionID(self, request):
+        try:
+            serverID, sessionID, _ = request.postpath
+        except ValueError:
+            return None
+
+        if any(not identifier or b'.' in identifier
+               for identifier in request.postpath):
+            return None
+
+        return sessionID
 
     def makeSession(self, sessionID, request):
         terminationDeferred = defer.Deferred()
@@ -814,8 +832,9 @@ class SessionHouse(object):
             protocol.disconnecting = 1
             protocol.connectionLost()
 
-    def attachToSession(self, serverID, sessionID, request):
-        if not (self.isValidID(serverID) and self.isValidID(sessionID)):
+    def attachToSession(self, request):
+        sessionID = self.validateAndExtractSessionID(request)
+        if sessionID is None:
             return False
 
         session = self.sessions.get(sessionID)
@@ -825,8 +844,9 @@ class SessionHouse(object):
         session.makeConnectionFromRequest(request)
         return True
 
-    def writeToSession(self, serverID, sessionID, data):
-        if not (self.isValidID(serverID) and self.isValidID(sessionID)):
+    def writeToSession(self, request):
+        sessionID = self.validateAndExtractSessionID(request)
+        if sessionID is None:
             return False
 
         try:
@@ -834,6 +854,7 @@ class SessionHouse(object):
         except KeyError:
             return False
         else:
+            data = request.content.read()
             session.dataReceived(data)
             return True
 

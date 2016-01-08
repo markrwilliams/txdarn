@@ -7,13 +7,13 @@ from collections import namedtuple
 from wsgiref.handlers import format_date_time
 
 import eliot
-from twisted.web import resource, template, http
+from twisted.web import resource, template, http, server
 
 import six
 
 from zope.interface import Interface, implementer
 
-from . import encoding, compat
+from . import encoding, compat, protocol
 
 
 class ImmutableDict(compat.Mapping):
@@ -151,12 +151,11 @@ class AccessControlPolicy(namedtuple('AccessControlPolicy',
     def forResource(self, resource):
         if self.methods is INFERRED:
             try:
-                methods = tuple(compat.networkString(method)
-                                for method in resource.allowedMethods)
+                methods = tuple(resource.allowedMethods)
             except AttributeError:
                 raise ValueError('Resource {!r} must have an allowedMethods'
                                  ' attribute when used with an INFERRED'
-                                 ' AccessControlPolicy')
+                                 ' AccessControlPolicy'.format(self))
             else:
                 return self._replace(methods=methods)
         else:
@@ -198,8 +197,7 @@ class HeaderPolicyApplyingResource(resource.Resource):
         if not allowedMethods:
             raise ValueError("instance must have allowedMethods")
 
-        required = set(compat.networkString(method)
-                       for method in allowedMethods)
+        required = set(allowedMethods)
         available = six.viewkeys(policies)
         missing = required - available
 
@@ -240,9 +238,17 @@ DEFAULT_ACCESS_CONTROL_POLICY = AccessControlPolicy(
     methods=INFERRED, maxAge=2000000)
 
 
+class _OptionsMixin(resource.Resource):
+    allowedMethods = ()
+
+    def setAllow(self, request):
+        request.setHeader(b'Allow', httpMultiValue(self.allowedMethods))
+        return b''
+
+
 class Greeting(resource.Resource):
     isLeaf = True
-    allowedMethods = ('GET',)
+    allowedMethods = (b'GET',)
 
     @encoding.contentType(b'text/plain')
     def render_GET(self, request):
@@ -282,7 +288,7 @@ class IFrameElement(template.Element):
 
 class IFrameResource(HeaderPolicyApplyingResource):
     isLeaf = True
-    allowedMethods = ('GET',)
+    allowedMethods = (b'GET',)
 
     policies = ImmutableDict(
         {b'GET': (DEFAULT_CACHEABLE_POLICY,
@@ -324,8 +330,8 @@ class IFrameResource(HeaderPolicyApplyingResource):
         return self.iframe
 
 
-class InfoResource(HeaderPolicyApplyingResource):
-    allowedMethods = ('GET', 'OPTIONS')
+class InfoResource(_OptionsMixin, HeaderPolicyApplyingResource):
+    allowedMethods = (b'GET', b'OPTIONS')
     isLeaf = True
 
     policies = ImmutableDict(
@@ -357,6 +363,7 @@ class InfoResource(HeaderPolicyApplyingResource):
         return self._random(*self.entropyRange)
 
     def render_OPTIONS(self, request):
+        self.setAllow(request)
         self.applyPolicies(request)
         return b''
 
@@ -369,8 +376,10 @@ class InfoResource(HeaderPolicyApplyingResource):
                              'entropy': self.calculateEntropy()})
 
 
-class XHRResource(object):
-    allowedMethods = ('POST', 'OPTIONS')
+class XHRResource(_OptionsMixin, HeaderPolicyApplyingResource):
+    """Read side of the XHR polling transport."""
+    allowedMethods = (b'POST', b'OPTIONS')
+    isLeaf = True
 
     policies = ImmutableDict(
         {b'POST': (DEFAULT_UNCACHEABLE_POLICY,
@@ -379,6 +388,54 @@ class XHRResource(object):
          b'OPTIONS': (DEFAULT_CACHEABLE_POLICY,
                       DEFAULT_ACCESS_CONTROL_POLICY)})
 
+    def __init__(self, sessions, policies=None):
+        HeaderPolicyApplyingResource.__init__(self, policies)
+        self.sessions = sessions
+
     def render_OPTIONS(self, request):
+        self.setAllow(request)
         self.applyPolicies(request)
+        return b''
+
+    @encoding.contentType(b'application/json')
+    def render_POST(self, request):
+        if not (request.postpath[-1] == b'xhr',
+                self.sessions.attachToSession(request)):
+            request.setResponseCode(404)
+            return b''
+        return server.NOT_DONE_YET
+
+
+class XHRSendResource(_OptionsMixin, HeaderPolicyApplyingResource):
+    """Write side of the XHR polling transport."""
+    allowedMethods = (b'POST', b'OPTIONS')
+    isLeaf = True
+
+    policies = ImmutableDict(
+        {b'POST': (DEFAULT_UNCACHEABLE_POLICY,
+                   DEFAULT_ACCESS_CONTROL_POLICY._replace(
+                       methods=(b'POST',))),
+         b'OPTIONS': (DEFAULT_CACHEABLE_POLICY,
+                      DEFAULT_ACCESS_CONTROL_POLICY)})
+
+    def __init__(self, sessions, policies=None):
+        HeaderPolicyApplyingResource.__init__(self, policies)
+        self.sessions = sessions
+
+    def render_OPTIONS(self, request):
+        self.setAllow(request)
+        self.applyPolicies(request)
+        return b''
+
+    @encoding.contentType(b'application/json')
+    def render_POST(self, request):
+        try:
+            if not (request.postpath[-1] == b'xhr_send' and
+                    self.sessions.writeToSession(request)):
+                request.setResponseCode(404)
+            else:
+                request.setResponseCode(204)
+        except protocol.InvalidData as invalidException:
+            request.setResponseCode(500)
+            return invalidException.reason
         return b''
