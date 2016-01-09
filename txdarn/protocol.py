@@ -275,11 +275,9 @@ class SockJSWireProtocolWrappingFactory(WrappingFactory):
 class SockJSProtocol(ProtocolWrapper):
     '''Wrap a user-supplied protocol for use with SockJS.'''
 
-    def __init__(self, factory, wrappedProtocol, heartbeatPeriod,
-                 clock=reactor):
+    def __init__(self, factory, wrappedProtocol):
         ProtocolWrapper.__init__(self, factory, wrappedProtocol)
-        heartbeater = HeartbeatClock(period=heartbeatPeriod, clock=clock)
-        self.sockJSMachine = SockJSProtocolMachine.withHeartbeater(heartbeater)
+        self.sockJSMachine = self.factory.stateMachineFactory()
 
     def connectionMade(self):
         # don't catch any exception here - we want to stop
@@ -295,7 +293,8 @@ class SockJSProtocol(ProtocolWrapper):
         self.sockJSMachine.write(data)
 
     def writeSequence(self, data):
-        self.sockJSMachine.write(data)
+        for datum in data:
+            self.sockJSMachine.write(datum)
 
     def loseConnection(self):
         self.sockJSMachine.disconnect()
@@ -320,11 +319,9 @@ class SockJSProtocolFactory(WrappingFactory):
         self.heartbeatPeriod = heartbeatPeriod
         self.clock = clock
 
-    def buildProtocol(self, addr):
-        return self.protocol(self,
-                             self.wrappedFactory.buildProtocol(addr),
-                             self.heartbeatPeriod,
-                             self.clock)
+    def stateMachineFactory(self):
+        heartbeater = HeartbeatClock(period=self.heartbeatPeriod)
+        return SockJSProtocolMachine.withHeartbeater(heartbeater)
 
 
 class SessionTimeout(Exception):

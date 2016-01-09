@@ -120,12 +120,23 @@ class RecordingProtocolFactory(Factory):
 
 
 class EchoProtocol(TestProtocol):
+    DISCONNECT = 'DISCONNECT'
 
     def dataReceived(self, data):
         if isinstance(data, list):
             self.transport.writeSequence(data)
         else:
             self.transport.write(data)
+
+    def connectionLost(self, reason):
+        self.factory.connectionLost.append(reason)
+
+
+class EchoProtocolFactory(Factory):
+    protocol = EchoProtocol
+
+    def __init__(self, connectionLost):
+        self.connectionLost = connectionLost
 
 
 class SockJSWireProtocolWrapperTestCase(unittest.TestCase):
@@ -171,28 +182,42 @@ class SockJSWireProtocolWrapperTestCase(unittest.TestCase):
         self.assertEqual(self.receivedData, [["letter", 2],
                                              ["another", None]])
 
+    def test_closeFrame(self):
+        '''closeFrame returns a serialized close frame for use by the
+        caller.
+
+        '''
+        frame = self.protocol.closeFrame(P.DISCONNECT.GO_AWAY)
+        self.assertEqual(frame, b'[3000,"Go away!"]\n')
+        self.assertFalse(self.transport.value())
+
     def test_emptyDataReceived(self):
         '''The wrapped protocol does not receive empty strings and the sender
         receives an error message.
 
         '''
-        self.protocol.dataReceived(b'')
-        self.assertFalse(self.receivedData)
-        self.assertEqual(self.transport.value(),
+        with self.assertRaises(P.InvalidData) as excContext:
+            self.protocol.dataReceived(b'')
+
+        self.assertEqual(excContext.exception.reason,
                          P.INVALID_DATA.NO_PAYLOAD.value)
+        self.assertFalse(self.receivedData)
 
     def test_badJSONReceived(self):
         '''The wrapped protocol does not receive malform JSON and the sender
         receives an error message.
 
         '''
-        self.protocol.dataReceived(b'!!!')
-        self.assertFalse(self.receivedData)
-        self.assertEqual(self.transport.value(),
+        with self.assertRaises(P.InvalidData) as excContext:
+            self.protocol.dataReceived(b'!!!')
+
+        self.assertEqual(excContext.exception.reason,
                          P.INVALID_DATA.BAD_JSON.value)
+        self.assertFalse(self.receivedData)
 
     def test_jsonEncoder(self):
-        '''SockJSWireProtocolWrapper can use a json.JSONEncoder subclass for writes.
+        '''SockJSWireProtocolWrapper can use a json.JSONEncoder subclass for
+        writes.
 
         '''
         class ComplexEncoder(json.JSONEncoder):
@@ -239,6 +264,44 @@ class SockJSWireProtocolWrapperTestCase(unittest.TestCase):
         self.assertEqual(self.receivedData, [{1, 2, 3}])
 
 
+class RecordsWireProtocolActions(object):
+
+    def __init__(self):
+        self.lostConnection = 0
+        self.wroteOpen = 0
+        self.wroteHeartbeat = 0
+        self.wroteData = []
+        self.wroteClose = []
+
+    def empty(self):
+        return not any([self.lostConnection,
+                        self.wroteOpen,
+                        self.wroteHeartbeat,
+                        self.wroteData,
+                        self.wroteClose])
+
+
+class FakeSockJSWireProtocol(object):
+
+    def __init__(self, recorder):
+        self._recorder = recorder
+
+    def loseConnection(self):
+        self._recorder.lostConnection += 1
+
+    def writeOpen(self):
+        self._recorder.wroteOpen += 1
+
+    def writeHeartbeat(self):
+        self._recorder.wroteHeartbeat += 1
+
+    def writeData(self, data):
+        self._recorder.wroteData.append(data)
+
+    def writeClose(self, reason):
+        self._recorder.wroteClose.append(reason)
+
+
 class RecordsHeartbeat(object):
 
     def __init__(self):
@@ -271,7 +334,8 @@ class SockJSProtocolMachineTestCase(unittest.TestCase):
         self.heartbeatRecorder = RecordsHeartbeat()
         self.heartbeater = FakeHeartbeatClock(self.heartbeatRecorder)
         self.sockJSMachine = P.SockJSProtocolMachine(self.heartbeater)
-        self.transport = StringTransport()
+        self.protocolRecorder = RecordsWireProtocolActions()
+        self.sockJSWireProtocol = FakeSockJSWireProtocol(self.protocolRecorder)
 
     def test_disconnectBeforeConnect(self):
         '''Disconnecting before connecting permanently disconnects
@@ -279,42 +343,40 @@ class SockJSProtocolMachineTestCase(unittest.TestCase):
 
         '''
         self.sockJSMachine.disconnect()
-        self.assertFalse(self.transport.value())
+        self.assertTrue(self.protocolRecorder.empty())
 
         with self.assertRaises(KeyError):
-            self.sockJSMachine.connect(self.transport)
+            self.sockJSMachine.connect(self.sockJSWireProtocol)
 
     def test_connect(self):
         '''SockJSProtocolMachine.connect writes an opening frame and schedules
         a heartbeat.
 
         '''
-        self.sockJSMachine.connect(self.transport)
-        self.assertEqual(self.transport.value(), b'o')
-        self.assertTrue(self.heartbeatRecorder.scheduleCalled)
+        self.sockJSMachine.connect(self.sockJSWireProtocol)
+        self.assertEqual(self.protocolRecorder.wroteOpen, 1)
+        self.assertEqual(self.heartbeatRecorder.scheduleCalls, 1)
 
     def test_write(self):
         '''SockJSProtocolMachine.write writes the requested data and
         (re)schedules a heartbeat.
 
         '''
-        self.sockJSMachine.connect(self.transport)
+        self.sockJSMachine.connect(self.sockJSWireProtocol)
         self.sockJSMachine.write([1, 'something'])
 
-        expectedProtocolTrace = b''.join([b'o', b'a[1,"something"]'])
-        self.assertEqual(self.transport.value(), expectedProtocolTrace)
-
+        self.assertEqual(self.protocolRecorder.wroteOpen, 1)
+        self.assertEqual(self.protocolRecorder.wroteData, [[1, 'something']])
         self.assertEqual(self.heartbeatRecorder.scheduleCalls, 2)
 
     def test_heartbeat(self):
         '''SockJSProtocolMachine.heartbeat writes a heartbeat!'''
-        self.sockJSMachine.connect(self.transport)
+        self.sockJSMachine.connect(self.sockJSWireProtocol)
         self.sockJSMachine.heartbeat()
 
-        expectedProtocolTrace = b''.join([b'o', b'h'])
-        self.assertEqual(self.transport.value(), expectedProtocolTrace)
-
-        self.assertTrue(self.heartbeatRecorder.scheduleCalls)
+        self.assertEqual(self.protocolRecorder.wroteOpen, 1)
+        self.assertEqual(self.protocolRecorder.wroteHeartbeat, 1)
+        self.assertEqual(self.heartbeatRecorder.scheduleCalls, 1)
 
     def test_withHeartBeater(self):
         '''SockJSProtocolMachine.withHeartbeater should associate a new
@@ -323,58 +385,130 @@ class SockJSProtocolMachineTestCase(unittest.TestCase):
         '''
         instance = P.SockJSProtocolMachine.withHeartbeater(
             self.heartbeater)
-        instance.connect(self.transport)
+        instance.connect(self.sockJSWireProtocol)
         self.heartbeater.writeHeartbeat()
 
-        expectedProtocolTrace = b''.join([b'o', b'h'])
-        self.assertEqual(self.transport.value(), expectedProtocolTrace)
+        self.assertEqual(self.protocolRecorder.wroteOpen, 1)
+        self.assertEqual(self.protocolRecorder.wroteHeartbeat, 1)
+        self.assertEqual(self.heartbeatRecorder.scheduleCalls, 1)
 
     def test_receive(self):
-        '''SockJSProtocolMachine.receive decodes JSON.'''
-        self.sockJSMachine.connect(self.transport)
-        self.assertEqual(self.sockJSMachine.receive(b'[1,"something"]'),
-                         [1, "something"])
+        '''SockJSProtocolMachine.receive passes decoded data through.'''
+        self.sockJSMachine.connect(self.sockJSWireProtocol)
+        data = [1, 'something']
+        self.assertEqual(self.sockJSMachine.receive(data), data)
 
     def test_disconnect(self):
         '''SockJSProtocolMachine.disconnect writes a close frame, disconnects
         the transport and cancels any pending heartbeats.
 
         '''
-        self.sockJSMachine.connect(self.transport)
+        self.sockJSMachine.connect(self.sockJSWireProtocol)
         self.sockJSMachine.disconnect(reason=P.DISCONNECT.GO_AWAY)
 
-        expectedProtocolTrace = b''.join([b'o', b'c[3000,"Go away!"]'])
-        self.assertTrue(self.transport.value(), expectedProtocolTrace)
-        self.assertTrue(self.heartbeatRecorder.stopCalls)
+        self.assertEqual(self.protocolRecorder.wroteOpen, 1)
+        self.assertEqual(self.protocolRecorder.wroteClose,
+                         [P.DISCONNECT.GO_AWAY])
+        self.assertEqual(self.protocolRecorder.lostConnection, 1)
+
+        self.assertEqual(self.heartbeatRecorder.stopCalls, 1)
+
+
+class RecordsProtocolMachineActions(object):
+
+    def __init__(self):
+        self.connect = []
+        self.received = []
+        self.written = []
+        self.disconnected = 0
+        self.closed = 0
+
+
+class FakeSockJSProtocolMachine(object):
+
+    def __init__(self, recorder):
+        self._recorder = recorder
+
+    def connect(self, transport):
+        self._recorder.connect.append(transport)
+
+    def receive(self, data):
+        self._recorder.received.append(data)
+        return data
+
+    def write(self, data):
+        self._recorder.written.append(data)
+
+    def disconnect(self):
+        self._recorder.disconnected += 1
+
+    def close(self):
+        self._recorder.closed += 1
 
 
 class SockJSProtocolTestCase(unittest.TestCase):
 
     def setUp(self):
-        self.transport = StringTransport()
-        self.clock = Clock()
+        self.connectionLost = []
+        self.stateMachineRecorder = RecordsProtocolMachineActions()
 
-        wrappedFactory = Factory.forProtocol(EchoProtocol)
-        self.factory = P.SockJSProtocolFactory(wrappedFactory,
-                                               clock=self.clock)
+        wrappedFactory = EchoProtocolFactory(self.connectionLost)
+        self.factory = P.SockJSProtocolFactory(wrappedFactory)
+
+        def fakeStateMachineFactory():
+            return FakeSockJSProtocolMachine(self.stateMachineRecorder)
+
+        self.factory.stateMachineFactory = fakeStateMachineFactory
+
         self.address = IPv4Address('TCP', '127.0.0.1', 80)
+        self.transport = StringTransport()
+
         self.protocol = self.factory.buildProtocol(self.address)
         self.protocol.makeConnection(self.transport)
 
+    def test_makeConnection(self):
+        '''makeConnection connects the state machine to the transport.'''
+        self.assertEqual(self.stateMachineRecorder.connect, [self.transport])
+
     def test_dataReceived_write(self):
+        '''dataReceived passes the data to the state machine's receive method
+        and the wrapped protocol.  With our echo protocol, we also
+        test that write() calls the machine's write method.
+
+        '''
         self.protocol.dataReceived(b'"something"')
-        expectedProtocolTrace = b''.join([b'o', b'a["something"]'])
-        self.assertEqual(self.transport.value(), expectedProtocolTrace)
+        self.assertEqual(self.stateMachineRecorder.received,
+                         [b'"something"'])
+        self.assertEqual(self.stateMachineRecorder.written,
+                         [b'"something"'])
 
     def test_dataReceived_writeSequence(self):
-        self.protocol.dataReceived(b'["something", "else"]')
-        expectedProtocolTrace = b''.join([b'o', b'a["something","else"]'])
-        self.assertEqual(self.transport.value(), expectedProtocolTrace)
+        '''dataReceived passes the data to the state machine's receive method
+        and the wrapped protocol.  With our echo protocol, we also
+        test that writeSequence() calls the machine's write method.
+
+        '''
+        self.protocol.dataReceived([b'"x"', b'"y"'])
+        self.assertEqual(self.stateMachineRecorder.received,
+                         [[b'"x"', b'"y"']])
+        # multiple write calls
+        self.assertEqual(self.stateMachineRecorder.written,
+                         [b'"x"', b'"y"'])
 
     def test_loseConnection(self):
+        '''loseConnection calls the state machine's disconnect method.'''
         self.protocol.loseConnection()
-        expectedProtocolTrace = b''.join([b'o', b'c[3000,"Go away!"]'])
-        self.assertEqual(self.transport.value(), expectedProtocolTrace)
+        self.assertEqual(self.stateMachineRecorder.disconnected, 1)
+
+    def test_connectionLost(self):
+        '''connectionLost calls the state machine's close method and the
+        wrapped protocol's connectionLost method.
+
+        '''
+        reason = "This isn't a real reason"
+        self.protocol.connectionLost(reason)
+        self.assertEqual(self.stateMachineRecorder.closed, 1)
+        self.assertEqual(self.connectionLost, [reason])
 
 
 class RequestSessionProtocolTestCase(unittest.TestCase):
@@ -542,11 +676,12 @@ class RequestSessionProtocolTestCase(unittest.TestCase):
 class TimeoutClockTestCase(unittest.TestCase):
 
     def setUp(self):
+        self.timeoutDeferred = Deferred()
         self.clock = Clock()
         self.length = 5.0
-        self.timedOut = False
 
-        self.timeoutClock = P.TimeoutClock(length=self.length,
+        self.timeoutClock = P.TimeoutClock(self.timeoutDeferred,
+                                           length=self.length,
                                            clock=self.clock)
 
     def test_start(self):
@@ -556,18 +691,14 @@ class TimeoutClockTestCase(unittest.TestCase):
         '''
 
         self.timeoutClock.start()
-        terminationDeferred = self.timeoutClock.terminated
 
         pendingExpiration = self.timeoutClock.timeoutCall
-        self.assertFalse(self.timedOut)
         self.assertEqual(self.clock.getDelayedCalls(), [pendingExpiration])
 
         self.clock.advance(self.length * 2)
 
         def assertTimedOutAndCannotRestart(_):
             self.assertFalse(self.clock.getDelayedCalls())
-
-            self.assertTrue(self.timedOut)
 
             self.assertIsNone(self.timeoutClock.timeoutCall)
 
@@ -577,7 +708,8 @@ class TimeoutClockTestCase(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.timeoutClock.reset()
 
-        terminationDeferred.addCallback(assertTimedOutAndCannotRestart)
+        self.timeoutDeferred.addCallback(assertTimedOutAndCannotRestart)
+        return self.timeoutDeferred
 
     def test_reset_interrupts(self):
         '''A reset() call will remove the pending timeout, so that a

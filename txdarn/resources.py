@@ -202,8 +202,6 @@ class HeaderPolicyApplyingResource(resource.Resource):
         missing = required - available
 
         if missing:
-            missing = {compat.stringFromNetwork(method)
-                       for method in missing}
             raise ValueError("missing methods: {}".format(missing))
 
         # adapt any policies we have to our resource
