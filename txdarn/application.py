@@ -10,20 +10,21 @@ class TxDarn(object):
     app = klein.Klein()
 
     def __init__(self, factory, config):
-        self.config = config
-
         self._greeting = R.Greeting()
+
         self._iframe = R.IFrameResource(
-            sockJSURL=self.config['sockjs-url'])
+            sockJSURL=config['sockjs-url'])
+
         self._info = R.InfoResource(
-            websocketsEnabled=self.config['websockets'])
+            websocketsEnabled=config['websockets'])
 
         self._sockJSFactory = P.SockJSProtocolFactory(factory)
 
-        self._xhrFactory = P.XHRSessionFactory(self._sockJSFactory)
-        self._sessions = P.SessionHouse(self._xhrFactory,
-                                        self.config['timeout'])
-        self._xhrResource = R.XHRResource(self._sessions)
+        self._sessions = P.SessionHouse()
+
+        self._xhrResource = R.XHRResource(self._sockJSFactory,
+                                          self._sessions,
+                                          timeout=config['timeout'])
         self._xhrSendResource = R.XHRSendResource(self._sessions)
 
     @app.route('/', strict_slashes=False)

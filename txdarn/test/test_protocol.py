@@ -188,7 +188,7 @@ class SockJSWireProtocolWrapperTestCase(unittest.TestCase):
 
         '''
         frame = self.protocol.closeFrame(P.DISCONNECT.GO_AWAY)
-        self.assertEqual(frame, b'[3000,"Go away!"]\n')
+        self.assertEqual(frame, b'c[3000,"Go away!"]\n')
         self.assertFalse(self.transport.value())
 
     def test_emptyDataReceived(self):
@@ -519,7 +519,7 @@ class RequestSessionProtocolTestCase(unittest.TestCase):
         self.request.transport = self.transport
 
         wrappedFactory = Factory.forProtocol(EchoProtocol)
-        self.factory = TestFactoryForRequestSessionProtocol(wrappedFactory)
+        self.factory = P.RequestSessionWrappingFactory(wrappedFactory)
 
         self.protocol = self.factory.buildProtocol(self.request.getHost())
         self.protocol.makeConnectionFromRequest(self.request)
@@ -620,7 +620,7 @@ class RequestSessionProtocolTestCase(unittest.TestCase):
 
         self.protocol.makeConnectionFromRequest(secondRequest)
         self.assertEqual(secondRequest.written,
-                         [b'c[2010,"Another connection still open"]'])
+                         [b'c[2010,"Another connection still open"]\n'])
         # but we can still write to our first request
         self.protocol.dataReceived(b'hello')
         self.assertEqual(self.request.written, [b'hello'])

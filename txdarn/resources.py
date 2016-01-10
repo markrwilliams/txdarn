@@ -386,8 +386,9 @@ class XHRResource(_OptionsMixin, HeaderPolicyApplyingResource):
          b'OPTIONS': (DEFAULT_CACHEABLE_POLICY,
                       DEFAULT_ACCESS_CONTROL_POLICY)})
 
-    def __init__(self, sessions, policies=None):
+    def __init__(self, factory, sessions, timeout, policies=None):
         HeaderPolicyApplyingResource.__init__(self, policies)
+        self.factory = protocol.XHRSessionFactory(factory, timeout)
         self.sessions = sessions
 
     def render_OPTIONS(self, request):
@@ -398,7 +399,7 @@ class XHRResource(_OptionsMixin, HeaderPolicyApplyingResource):
     @encoding.contentType(b'application/json')
     def render_POST(self, request):
         if not (request.postpath[-1] == b'xhr',
-                self.sessions.attachToSession(request)):
+                self.sessions.attachToSession(self.factory, request)):
             request.setResponseCode(404)
             return b''
         return server.NOT_DONE_YET
