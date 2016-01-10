@@ -2,7 +2,16 @@ from txdarn import resources as R
 from txdarn import protocol as P
 from txdarn import compat
 
+import six
+
 import klein
+
+if six.PY3:
+    def _convertPostpathString(string):
+        return compat.networkString(string)
+else:
+    def _convertPostpathString(string):
+        return string
 
 
 class TxDarn(object):
@@ -43,14 +52,14 @@ class TxDarn(object):
     with app.subroute('/<serverID>/<sessionID>') as sessionApp:
         @sessionApp.route('/xhr')
         def xhr(self, request, serverID, sessionID):
-            request.postpath = [compat.networkString(serverID),
-                                compat.networkString(sessionID),
+            request.postpath = [_convertPostpathString(serverID),
+                                _convertPostpathString(sessionID),
                                 b'xhr']
             return self._xhrResource
 
         @sessionApp.route('/xhr_send')
         def xhr_send(self, request, serverID, sessionID):
-            request.postpath = [compat.networkString(serverID),
-                                compat.networkString(sessionID),
+            request.postpath = [_convertPostpathString(serverID),
+                                _convertPostpathString(sessionID),
                                 b'xhr_send']
             return self._xhrSendResource
