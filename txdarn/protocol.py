@@ -443,7 +443,7 @@ class RequestSessionMachine(object):
     def _flushBuffer(self, request):
         '''Flush any pending data from the buffer to the request'''
         assert request is self.requestSession.request
-        self.requestSession.writeData(self.buffer)
+        self.requestSession.completeWrite(self.buffer)
         self.buffer = []
 
     @_machine.output()

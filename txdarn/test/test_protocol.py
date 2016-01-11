@@ -511,6 +511,93 @@ class SockJSProtocolTestCase(unittest.TestCase):
         self.assertEqual(self.connectionLost, [reason])
 
 
+class RecordsRequestSessionActions(object):
+
+    def __init__(self):
+        self.request = None
+        self.connectionsEstablished = []
+        self.connectionsCompleted = []
+        self.requestsBegun = 0
+        self.dataReceived = []
+        self.completelyWritten = []
+        self.heartbeatsCompleted = 0
+        self.currentRequestsFinished = 0
+        self.connectionsCompletelyLost = 0
+
+
+class FakeRequestSessionMachine(object):
+
+    def __init__(self, recorder):
+        self.recorder = recorder
+
+    @property
+    def request(self):
+        return self.recorder.request
+
+    @request.setter
+    def request(self, request):
+        self.recorder.request = request
+
+    def establishConnection(self, request):
+        self.recorder.connectionsEstablished.append(request)
+
+    def completeConnection(self, request):
+        self.recorder.connectionsCompleted.append(request)
+
+    def beginRequest(self):
+        self.recorder.requestsBegun += 1
+
+    def completeDataReceived(self, data):
+        self.recorder.dataReceived.append(data)
+
+    def completeWrite(self, data):
+        self.recorder.completelyWritten.append(data)
+
+    def completeHeartbeat(self):
+        self.recorder.heartbeatsCompleted += 1
+
+    def finishCurrentRequest(self):
+        self.recorder.currentRequestsFinished += 1
+
+    def closeFrame(self, reason):
+        return reason
+
+    def completeLoseConnection(self):
+        self.recorder.connectionsCompletelyLost += 1
+
+
+class RequestSessionMachineTestCase(unittest.TestCase):
+
+    def setUp(self):
+        self.recorder = RecordsRequestSessionActions()
+        self.fakeRequestSession = FakeRequestSessionMachine(self.recorder)
+        self.requestSessionMachine = P.RequestSessionMachine(
+            self.fakeRequestSession)
+
+        self.request = DummyRequest([b'ignored'])
+
+    def test_firstAttach(self):
+        '''Attaching the first request to a RequestSessionMachine sets up the
+        the protocol wrapper, begins the request, then attaches the
+        protocol wrapper to the wrapped protocol as its transport.
+
+        '''
+        self.requestSessionMachine.attach(self.request)
+        self.assertIs(self.recorder.request, self.request)
+        self.assertEqual(self.recorder.connectionsEstablished, [self.request])
+        self.assertEqual(self.recorder.requestsBegun, 1)
+        self.assertEqual(self.recorder.connectionsCompleted, [self.request])
+
+    def test_connectedWrite(self):
+        '''With an attached request, write calls completeWrite and does not
+        buffer.
+
+        '''
+        self.test_firstAttach()
+        self.requestSessionMachine.write(b"abc")
+        self.assertEqual(self.recorder.completelyWritten, [b"abc"])
+
+
 class RequestSessionProtocolTestCase(unittest.TestCase):
 
     def setUp(self):
