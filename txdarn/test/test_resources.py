@@ -130,7 +130,7 @@ class CachePolicyTestCase(PolicyTestCase):
 
 
 class GETPOSTResource(object):
-    allowedMethods = ('GET', 'POST')
+    allowedMethods = (b'GET', b'POST')
 
 
 class AccessControlPolicyTestCase(PolicyTestCase):
@@ -239,7 +239,7 @@ class HeaderPolicyApplyingResourceTestCase(PolicyTestCase):
         self.recorder = RecordsPolicy()
 
         class TestResource(R.HeaderPolicyApplyingResource):
-            allowedMethods = ('GET',)
+            allowedMethods = (b'GET',)
             policies = R.ImmutableDict({b'GET': (FakePolicy(self.recorder),)})
 
         self.TestResource = TestResource

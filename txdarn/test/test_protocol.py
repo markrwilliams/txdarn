@@ -520,9 +520,11 @@ class RecordsRequestSessionActions(object):
         self.requestsBegun = 0
         self.dataReceived = []
         self.completelyWritten = []
+        self.dataWritten = []
         self.heartbeatsCompleted = 0
         self.currentRequestsFinished = 0
-        self.connectionsCompletelyLost = 0
+        self.connectionsLostCompletely = 0
+        self.connectionsCompletelyLost = []
 
 
 class FakeRequestSessionMachine(object):
@@ -550,6 +552,9 @@ class FakeRequestSessionMachine(object):
     def completeDataReceived(self, data):
         self.recorder.dataReceived.append(data)
 
+    def writeData(self, data):
+        self.recorder.dataWritten.append(data)
+
     def completeWrite(self, data):
         self.recorder.completelyWritten.append(data)
 
@@ -558,12 +563,28 @@ class FakeRequestSessionMachine(object):
 
     def finishCurrentRequest(self):
         self.recorder.currentRequestsFinished += 1
+        self.request = None
 
     def closeFrame(self, reason):
         return reason
 
     def completeLoseConnection(self):
-        self.recorder.connectionsCompletelyLost += 1
+        self.recorder.connectionsLostCompletely += 1
+
+    def completeConnectionLost(self, reason):
+        self.recorder.connectionsCompletelyLost.append(reason)
+
+
+class DummyRequestAllowsNonBytes(DummyRequest):
+    '''A DummyRequest subclass that does not assert write has been called
+    with bytes.  Use me when you want to inspect something that an
+    intermediary would have serialized before writing it to the
+    request.
+
+    '''
+
+    def write(self, data):
+        self.written.append(data)
 
 
 class RequestSessionMachineTestCase(unittest.TestCase):
@@ -588,7 +609,7 @@ class RequestSessionMachineTestCase(unittest.TestCase):
         self.assertEqual(self.recorder.requestsBegun, 1)
         self.assertEqual(self.recorder.connectionsCompleted, [self.request])
 
-    def test_connectedWrite(self):
+    def test_connectedHaveTransportWrite(self):
         '''With an attached request, write calls completeWrite and does not
         buffer.
 
@@ -597,167 +618,245 @@ class RequestSessionMachineTestCase(unittest.TestCase):
         self.requestSessionMachine.write(b"abc")
         self.assertEqual(self.recorder.completelyWritten, [b"abc"])
 
-
-class RequestSessionProtocolTestCase(unittest.TestCase):
-
-    def setUp(self):
-        self.transport = StringTransport()
-        self.request = DummyRequest([b'ignored'])
-        self.request.transport = self.transport
-
-        wrappedFactory = Factory.forProtocol(EchoProtocol)
-        self.factory = P.RequestSessionWrappingFactory(wrappedFactory)
-
-        self.protocol = self.factory.buildProtocol(self.request.getHost())
-        self.protocol.makeConnectionFromRequest(self.request)
-
-    def test_makeConnection_forbidden(self):
-        '''
-        RequestSessionProtocol.makeConnection raises a RuntimeError.
-        '''
-        protocol = self.factory.buildProtocol(self.request.getHost())
-
-        with self.assertRaises(RuntimeError):
-            protocol.makeConnection(self.transport)
-
-    def test_write(self):
-        ''' RequestSessionProtocol.write writes data to the request, not the
-        transport.
+    def test_connectedHaveTransportReceive(self):
+        '''With an attached request, received data passes on to the wrapped
+        protocol.
 
         '''
-        self.protocol.dataReceived(b'something')
-        self.assertEqual(self.request.written, [b'something'])
-        self.assertFalse(self.transport.value())
+        self.test_firstAttach()
+        self.requestSessionMachine.receive(b"abc")
+        self.assertEqual(self.recorder.dataReceived, [b"abc"])
 
-    def test_writeSequence(self):
-        '''RequestSessionProtocol.writeSequence also writes data to the
-        request, not the transport.
+    def test_connectedHaveTransportHeartbeat(self):
+        '''With an attached request, heartbeats are immediately sent.'''
+        self.test_firstAttach()
+        self.requestSessionMachine.heartbeat()
+        self.assertEqual(self.recorder.heartbeatsCompleted, 1)
 
-        '''
-        self.protocol.dataReceived([b'something', b'else'])
-        self.assertEqual(self.request.written, [b'something', b'else'])
-        self.assertFalse(self.transport.value())
+    def test_connectedHaveTransportDetach(self):
+        '''Detaching from a request finishes that request.'''
+        self.test_firstAttach()
+        self.requestSessionMachine.detach()
+        self.assertEqual(self.recorder.currentRequestsFinished, 1)
 
-    def test_loseConnection(self):
-        '''RequestSessionProtocol.loseConnection finishes the request.'''
-
-        finishedDeferred = self.request.notifyFinish()
-
-        def assertFinished(ignored):
-            self.assertEqual(self.request.finished, 1)
-            # DummyRequest doesn't call its transport's loseConnection
-            self.assertFalse(self.transport.disconnecting)
-
-        finishedDeferred.addCallback(assertFinished)
-
-        self.protocol.dataReceived([b'about to close!'])
-        self.protocol.loseConnection()
-
-        self.assertEqual(self.request.written, [b'about to close!'])
-
-        return finishedDeferred
-
-    def test_connectionLost(self):
-        '''RequestSessionProtocol.connectionLost calls through to the wrapped
-        protocol with Connection Done when there's no pending data.
+    def test_connectedHaveTransportDuplicateAttach(self):
+        '''Attempting to attach a request to a RequestSessionMachine that's
+        already attached to a request closes the attached request.
 
         '''
+        self.test_firstAttach()
+        duplicateRequest = DummyRequestAllowsNonBytes(b'duplicate')
+        ensureTerminated = duplicateRequest.notifyFinish()
+        self.requestSessionMachine.attach(duplicateRequest)
 
-        ensureCalled = Deferred()
+        def ensureCloseFrame(ignored):
+            self.assertEqual(duplicateRequest.written,
+                             [P.DISCONNECT.STILL_OPEN])
 
-        def trapConnectionDone(failure):
-            failure.trap(ConnectionDone)
+        ensureTerminated.addCallback(ensureCloseFrame)
 
-        ensureCalled.addErrback(trapConnectionDone)
+        return ensureTerminated
 
-        def connectionLost(reason):
-            ensureCalled.errback(reason)
+    def assertDuplicateRequestClosedWith(self, reason):
+        '''Assert that a second request is finished with the given reason.'''
+        duplicateRequest = DummyRequestAllowsNonBytes(b'duplicate')
+        ensureTerminated = duplicateRequest.notifyFinish()
 
-        self.protocol.wrappedProtocol.connectionLost = connectionLost
-        self.protocol.connectionLost()
+        self.requestSessionMachine.attach(duplicateRequest)
 
-        return ensureCalled
+        def ensureCloseReasonWritten(ignored):
+            self.assertEqual(duplicateRequest.written,
+                             [P.DISCONNECT.GO_AWAY])
+        return ensureTerminated
 
-    def test_detachAndReattach(self):
-        '''RequestSessionProtocol.detachFromRequest buffers subsequent writes,
-        which are flushed as soon as makeConnectionFromRequest is
-        called again.
+    def test_connectedHaveTransportWriteCloseAndLoseConnection(self):
+        '''Writing a close frame to a RequestSessionMachine stores it on the
+        machine so it will be written upon loseConnection.
 
-        '''
-        self.protocol.detachFromRequest()
-        self.protocol.dataReceived(b'pending')
-        self.protocol.dataReceived(b'more pending')
-        self.assertFalse(self.request.written)
-
-        self.protocol.makeConnectionFromRequest(self.request)
-        self.assertEqual(self.request.written, [b'pending', b'more pending'])
-
-        self.protocol.dataReceived(b'written!')
-        self.assertEqual(self.request.written, [b'pending', b'more pending',
-                                                b'written!'])
-
-    def test_doubleMakeConnectionFromRequestClosesDuplicate(self):
-        '''A RequestSessionProtocol that's attached to a request will close a
-        second request with an error message.
 
         '''
-        secondRequest = DummyRequest([b'another'])
-        secondTransport = StringTransport()
-        secondRequest.transport = secondTransport
+        self.test_firstAttach()
+        self.requestSessionMachine.writeClose(P.DISCONNECT.GO_AWAY)
+        self.requestSessionMachine.loseConnection()
 
-        self.protocol.makeConnectionFromRequest(secondRequest)
-        self.assertEqual(secondRequest.written,
-                         [b'c[2010,"Another connection still open"]\n'])
-        # but we can still write to our first request
-        self.protocol.dataReceived(b'hello')
-        self.assertEqual(self.request.written, [b'hello'])
+        ensureTerminated = self.assertDuplicateRequestClosedWith(
+            P.DISCONNECT.GO_AWAY)
 
-    def test_loseConnection_whenDetached(self):
-        '''A RequestSessionProtocol with pending data has loseConnection
-        called, its connectionLost method receives a SessionTimeout
-        failure.
+        def ensureCompleteLoseConnection(ignored):
+            self.assertEqual(self.recorder.connectionsLostCompletely, 1)
+
+        ensureTerminated.addCallback(ensureCompleteLoseConnection)
+
+        return ensureTerminated
+
+    def test_connectedHaveTransportLoseConnection(self):
+        '''Losing the connection closes the connection and closes the
+        wrapped protocol.
+
         '''
-        self.protocol.detachFromRequest()
-        self.protocol.dataReceived(b'pending')
-        self.protocol.loseConnection()
+        self.test_firstAttach()
+        self.requestSessionMachine.loseConnection()
+        self.assertEqual(self.recorder.connectionsLostCompletely, 1)
 
-        ensureCalled = Deferred()
+    def test_connectedHaveTransportConnectionLost(self):
+        '''connectionLost unsets the RequestSession's request (but does *not*
+        call its finish() a second time) and calls the wrapped
+        protocol's connectionLost.
 
-        def trapSessionTimeout(failure):
-            failure.trap(P.SessionTimeout)
-
-        ensureCalled.addErrback(trapSessionTimeout)
-
-        def connectionLost(reason):
-            ensureCalled.errback(reason)
-
-        self.protocol.wrappedProtocol.connectionLost = connectionLost
-        self.protocol.connectionLost()
-
-        return ensureCalled
-
-    def test_connectionLost_whenDetached(self):
-        '''A RequestSessionProtocol with pending data has loseConnection
-        called, its connectionLost method receives a SessionTimeout
-        failure.
         '''
-        self.protocol.detachFromRequest()
-        self.protocol.dataReceived(b'pending')
+        self.test_firstAttach()
+        self.requestSessionMachine.connectionLost(reason="Some Reason")
+        self.assertIsNone(self.recorder.request)
+        self.assertEqual(self.recorder.connectionsCompletelyLost,
+                         ["Some Reason"])
+        self.assertFalse(self.request.finished)
 
-        ensureCalled = Deferred()
+    def test_connectedNoTransportEmptyBufferReceive(self):
+        '''The wrapped protocol receives data even when there's no attached
+        outgoing request.
 
-        def trapSessionTimeout(failure):
-            failure.trap(P.SessionTimeout)
+        '''
+        self.test_firstAttach()
+        self.requestSessionMachine.detach()
 
-        ensureCalled.addErrback(trapSessionTimeout)
+        deserializedMessage = ["I wasn't serialized'"]
 
-        def connectionLost(reason):
-            ensureCalled.errback(reason)
+        self.requestSessionMachine.receive(deserializedMessage)
 
-        self.protocol.wrappedProtocol.connectionLost = connectionLost
-        self.protocol.connectionLost()
+    def test_connectedNoTransportEmptyBufferHeartbeat(self):
+        '''Heartbeats are not sent when there's no attached request and the
+        write buffer is empty.
 
-        return ensureCalled
+        '''
+        self.test_firstAttach()
+        self.requestSessionMachine.detach()
+
+        self.requestSessionMachine.heartbeat()
+        self.assertEqual(self.recorder.heartbeatsCompleted, 0)
+
+    def test_connectedNoTransportEmptyBufferDetach(self):
+        '''Detaching a RequestSessionMachine that's already detached is a safe
+        noop, so wrappers can always call detach() safel.
+
+        '''
+        self.test_firstAttach()
+        self.requestSessionMachine.detach()
+        self.requestSessionMachine.detach()
+
+    def test_connectedNoTransportEmptyBufferWriteCloseAndLoseConnection(self):
+        '''Writing a close frame to a RequestSessionMachine stores it on the
+        machine so it will be written upon loseConnection.
+
+
+        '''
+        self.test_firstAttach()
+        self.requestSessionMachine.detach()
+        self.requestSessionMachine.writeClose(P.DISCONNECT.GO_AWAY)
+        self.requestSessionMachine.loseConnection()
+
+        ensureTerminated = self.assertDuplicateRequestClosedWith(
+            P.DISCONNECT.GO_AWAY)
+
+        def ensureCompleteLoseConnection(ignored):
+            self.assertEqual(self.recorder.connectionsLostCompletely, 1)
+
+        ensureTerminated.addCallback(ensureCompleteLoseConnection)
+
+        return ensureTerminated
+
+    def test_connectedNoTransportEmptyBufferConnectionLost(self):
+        '''A RequestSessionMachine with no attached request and an empty
+        buffer simply closes the protocol upon connectionLost.
+
+        '''
+        self.test_firstAttach()
+        self.requestSessionMachine.detach()
+
+        someReason = 'not a real reason'
+
+        self.requestSessionMachine.connectionLost(someReason)
+        self.assertEqual(self.recorder.connectionsCompletelyLost, [someReason])
+
+    def test_noTransportWriteThenAttach(self):
+        '''Writes are buffered when there's no attached request.  Attaching a
+        request flushes the buffer.
+        '''
+        self.test_firstAttach()
+        self.requestSessionMachine.detach()
+
+        unserializedMessage = ["I wasn't serialized"]
+
+        self.requestSessionMachine.write(unserializedMessage)
+        self.requestSessionMachine.write(unserializedMessage)
+        self.assertEqual(self.requestSessionMachine.buffer,
+                         unserializedMessage * 2)
+
+        newRequest = DummyRequestAllowsNonBytes([b'newRequest'])
+
+        self.requestSessionMachine.attach(newRequest)
+        self.assertEqual(self.requestSessionMachine.buffer, [])
+
+        # the two lists have been concatenated into one, and were
+        # flushed with a single call to requestSession.writeData
+        self.assertEqual(self.recorder.dataWritten,
+                         [unserializedMessage * 2])
+
+    def test_connectedNoTransportPendingReceive(self):
+        '''Received data passes immediately to the wrapped protocol, even when
+        there's pending data.
+
+        '''
+        self.test_firstAttach()
+        self.requestSessionMachine.detach()
+        self.requestSessionMachine.write(b'abc')
+        self.requestSessionMachine.receive(b'xyz')
+        self.assertEqual(self.recorder.dataReceived, [b'xyz'])
+
+    def test_connectedNoTransportPendingHeartbeat(self):
+        '''Heartbeats are not sent when there's no attached request and
+        pending data.
+
+        '''
+        self.test_firstAttach()
+        self.requestSessionMachine.detach()
+        self.requestSessionMachine.write(b'abc')
+        self.requestSessionMachine.heartbeat()
+        self.assertEqual(self.recorder.heartbeatsCompleted, 0)
+
+    def test_connectedNoTransportPendingWriteCloseAndLoseConnection(self):
+        '''Writing a close frame to a RequestSessionMachine stores it on the
+        machine so it will be written upon loseConnection.
+
+        '''
+        self.test_firstAttach()
+        self.requestSessionMachine.detach()
+        self.requestSessionMachine.write(b'abc')
+        self.requestSessionMachine.writeClose(P.DISCONNECT.GO_AWAY)
+        self.requestSessionMachine.loseConnection()
+
+        ensureTerminated = self.assertDuplicateRequestClosedWith(
+            P.DISCONNECT.GO_AWAY)
+
+        def ensureCompleteLoseConnection(ignored):
+            self.assertEqual(self.recorder.connectionsLostCompletely, 1)
+
+        ensureTerminated.addCallback(ensureCompleteLoseConnection)
+
+        return ensureTerminated
+
+    def test_connectedNoTransportPendingConnectionLost(self):
+        '''If the session times out before all data can be written,
+        connectionLost provides calls the wrapped protocol's ConnectionLost
+        with a SessionTimeout failure.
+
+        '''
+        self.test_firstAttach()
+        self.requestSessionMachine.detach()
+        self.requestSessionMachine.write('xyz')
+        self.requestSessionMachine.connectionLost()
+        self.assertEqual(len(self.recorder.connectionsCompletelyLost), 1)
+        failure = self.recorder.connectionsCompletelyLost[0]
+        failure.trap(P.SessionTimeout)
 
 
 class TimeoutClockTestCase(unittest.TestCase):

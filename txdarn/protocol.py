@@ -1,3 +1,14 @@
+'''Core protocol implementation.
+
+Classes that use automat's MethodicalMachine can be visualized!
+
+Here's how to do it:
+
+python -c 'import sys, txdarn.protocol as P; \
+           sys.stdout.writelines(P.RequestSessionMachine._machine.graphviz)' \
+      | dot -Tpng > machine.png
+'''
+
 from automat import MethodicalMachine
 
 import eliot
@@ -443,7 +454,7 @@ class RequestSessionMachine(object):
     def _flushBuffer(self, request):
         '''Flush any pending data from the buffer to the request'''
         assert request is self.requestSession.request
-        self.requestSession.completeWrite(self.buffer)
+        self.requestSession.writeData(self.buffer)
         self.buffer = []
 
     @_machine.output()
@@ -491,6 +502,10 @@ class RequestSessionMachine(object):
         request.finish()
 
     @_machine.output()
+    def _dropRequest(self, reason=protocol.connectionDone):
+        self.requestSession.request = None
+
+    @_machine.output()
     def _closeProtocol(self, reason=protocol.connectionDone):
         self.requestSession.completeConnectionLost(reason)
         self.requestSession = None
@@ -499,7 +514,6 @@ class RequestSessionMachine(object):
     def _timedOut(self, reason=protocol.connectionDone):
         if isinstance(reason.value, error.ConnectionDone):
             reason = failure.Failure(SessionTimeout())
-        self.requestSession.request = None
         self.requestSession.completeConnectionLost(reason=reason)
         self.requestSession = None
 
@@ -525,6 +539,7 @@ class RequestSessionMachine(object):
     connectedHaveTransport.upon(attach,
                                 enter=connectedHaveTransport,
                                 outputs=[_closeDuplicateRequest])
+    # XXX this should transition to a new state: expectLoseConnection.
     connectedHaveTransport.upon(writeClose,
                                 enter=connectedHaveTransport,
                                 outputs=[_storeCloseReason])
@@ -534,7 +549,8 @@ class RequestSessionMachine(object):
                                          _loseConnection])
     connectedHaveTransport.upon(connectionLost,
                                 enter=disconnected,
-                                outputs=[_timedOut])
+                                outputs=[_dropRequest,
+                                         _closeProtocol])
 
     connectedNoTransportEmptyBuffer.upon(write,
                                          enter=connectedNoTransportPending,
@@ -552,6 +568,7 @@ class RequestSessionMachine(object):
     connectedNoTransportEmptyBuffer.upon(detach,
                                          enter=connectedNoTransportEmptyBuffer,
                                          outputs=[])
+    # XXX this should transition to a new state: expectConnectionLost
     connectedNoTransportEmptyBuffer.upon(writeClose,
                                          enter=connectedNoTransportEmptyBuffer,
                                          outputs=[_storeCloseReason])
@@ -597,7 +614,8 @@ class RequestSessionMachine(object):
                                               _loseConnection])
     connectedNoTransportPending.upon(connectionLost,
                                      enter=disconnected,
-                                     outputs=[_timedOut])
+                                     outputs=[_dropRequest,
+                                              _timedOut])
 
     loseConnectionPending.upon(connectionLost,
                                enter=disconnected,
@@ -837,6 +855,7 @@ class SessionHouse(object):
             return False
 
         session = self.sessions.get(sessionID)
+        print('read', sessionID, session)
         if not session:
             session = self.makeSession(sessionID, factory, request)
             self.sessions[sessionID] = session
@@ -848,7 +867,7 @@ class SessionHouse(object):
         sessionID = self.validateAndExtractSessionID(request)
         if sessionID is None:
             return False
-
+        print('write', sessionID)
         try:
             session = self.sessions[sessionID]
         except KeyError:

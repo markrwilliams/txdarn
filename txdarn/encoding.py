@@ -5,6 +5,8 @@ from .exceptions import TxDarnException
 ENCODING = 'UTF-8'
 ENCODING_BYTES = ENCODING.encode('ascii')
 
+EMPTY = b''
+
 
 class MalformedContentType(TxDarnException):
     '''
@@ -31,7 +33,7 @@ class _contentTypeDecorator(object):
 
     def __call__(self, request, *args, **kwargs):
         result = self.callableObject(request, *args, **kwargs)
-        if result:
+        if result or result is EMPTY:
             request.setHeader(b'Content-Type', self.formattedContentType)
         return result
 

@@ -394,14 +394,14 @@ class XHRResource(_OptionsMixin, HeaderPolicyApplyingResource):
     def render_OPTIONS(self, request):
         self.setAllow(request)
         self.applyPolicies(request)
-        return b''
+        return encoding.EMPTY
 
     @encoding.contentType(b'application/json')
     def render_POST(self, request):
         if not (request.postpath[-1] == b'xhr',
                 self.sessions.attachToSession(self.factory, request)):
             request.setResponseCode(404)
-            return b''
+            return encoding.EMPTY
         return server.NOT_DONE_YET
 
 
@@ -424,9 +424,9 @@ class XHRSendResource(_OptionsMixin, HeaderPolicyApplyingResource):
     def render_OPTIONS(self, request):
         self.setAllow(request)
         self.applyPolicies(request)
-        return b''
+        return encoding.EMPTY
 
-    @encoding.contentType(b'application/json')
+    @encoding.contentType(b'text/plain')
     def render_POST(self, request):
         try:
             if not (request.postpath[-1] == b'xhr_send' and
@@ -437,4 +437,4 @@ class XHRSendResource(_OptionsMixin, HeaderPolicyApplyingResource):
         except protocol.InvalidData as invalidException:
             request.setResponseCode(500)
             return invalidException.reason
-        return b''
+        return encoding.EMPTY
