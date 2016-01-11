@@ -855,7 +855,6 @@ class SessionHouse(object):
             return False
 
         session = self.sessions.get(sessionID)
-        print('read', sessionID, session)
         if not session:
             session = self.makeSession(sessionID, factory, request)
             self.sessions[sessionID] = session
@@ -867,7 +866,6 @@ class SessionHouse(object):
         sessionID = self.validateAndExtractSessionID(request)
         if sessionID is None:
             return False
-        print('write', sessionID)
         try:
             session = self.sessions[sessionID]
         except KeyError:
