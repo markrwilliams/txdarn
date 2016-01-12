@@ -412,13 +412,15 @@ class XHRResource(_OptionsMixin, HeaderPolicyApplyingResource):
         self.applyPolicies(request)
         return encoding.EMPTY
 
-    @encoding.contentType(b'application/json')
+    @encoding.contentType(b'application/javascript')
     def render_POST(self, request):
-        if not (request.postpath[-1] == b'xhr',
-                self.sessions.attachToSession(self.factory, request)):
-            request.setResponseCode(404)
-            return encoding.EMPTY
-        return server.NOT_DONE_YET
+        self.applyPolicies(request)
+        if (request.postpath[-1] == b'xhr' and
+           self.sessions.attachToSession(self.factory, request)):
+            return server.NOT_DONE_YET
+
+        request.setResponseCode(http.NOT_FOUND)
+        return encoding.EMPTY
 
 
 class XHRSendResource(_OptionsMixin, HeaderPolicyApplyingResource):
@@ -444,13 +446,14 @@ class XHRSendResource(_OptionsMixin, HeaderPolicyApplyingResource):
 
     @encoding.contentType(b'text/plain')
     def render_POST(self, request):
+        self.applyPolicies(request)
         try:
-            if not (request.postpath[-1] == b'xhr_send' and
-                    self.sessions.writeToSession(request)):
-                request.setResponseCode(404)
+            if (request.postpath[-1] == b'xhr_send' and
+               self.sessions.writeToSession(request)):
+                request.setResponseCode(http.NO_CONTENT)
             else:
-                request.setResponseCode(204)
+                request.setResponseCode(http.NOT_FOUND)
         except protocol.InvalidData as invalidException:
-            request.setResponseCode(500)
+            request.setResponseCode(http.INTERNAL_SERVER_ERROR)
             return invalidException.reason
         return encoding.EMPTY

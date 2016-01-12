@@ -3,10 +3,20 @@ from twisted.web.test import requesthelper
 from txdarn import encoding as E
 
 
+class DummyRequestResponseHeaders(requesthelper.DummyRequest):
+
+    def setHeader(self, header, value):
+        self.responseHeaders.setRawHeaders(header, [value])
+
+    @property
+    def sortedResponseHeaders(self):
+        return sorted(self.responseHeaders.getAllRawHeaders())
+
+
 class ContentTypeDecoratorTestCase(unittest.SynchronousTestCase):
 
     def setUp(self):
-        self.request = requesthelper.DummyRequest('ignored')
+        self.request = DummyRequestResponseHeaders(b'ignored')
 
     def test_withInvalidContentType(self):
         '''
@@ -20,7 +30,7 @@ class ContentTypeDecoratorTestCase(unittest.SynchronousTestCase):
             def neverCalled(request):
                 return b'ok'
 
-        self.assertFalse(self.request.outgoingHeaders)
+        self.assertFalse(self.request.sortedResponseHeaders)
 
     def test_withNoParams(self):
         '''
@@ -32,8 +42,8 @@ class ContentTypeDecoratorTestCase(unittest.SynchronousTestCase):
             return b'ok'
 
         handler(self.request)
-        self.assertEqual(self.request.outgoingHeaders,
-                         {b'content-type': b'text/html; charset=UTF-8'})
+        self.assertEqual(self.request.sortedResponseHeaders,
+                         [(b'Content-Type', [b'text/html; charset=UTF-8'])])
 
     def test_withParams(self):
         '''
@@ -45,9 +55,9 @@ class ContentTypeDecoratorTestCase(unittest.SynchronousTestCase):
             return b'ok'
 
         handler(self.request)
-        self.assertEqual(self.request.outgoingHeaders,
-                         {b'content-type':
-                          b'text/html; q=1 charset=UTF-8'})
+        self.assertEqual(self.request.sortedResponseHeaders,
+                         [(b'Content-Type',
+                           [b'text/html; q=1 charset=UTF-8'])])
 
     def test_decoratedMethod(self):
         '''
@@ -61,9 +71,9 @@ class ContentTypeDecoratorTestCase(unittest.SynchronousTestCase):
                 return b'ok'
 
         FakeResource().handler(self.request)
-        self.assertEqual(self.request.outgoingHeaders,
-                         {b'content-type':
-                          b'text/html; q=1 charset=UTF-8'})
+        self.assertEqual(self.request.sortedResponseHeaders,
+                         [(b'Content-Type',
+                           [b'text/html; q=1 charset=UTF-8'])])
 
     def test_emptyResponse(self):
         '''
@@ -75,4 +85,4 @@ class ContentTypeDecoratorTestCase(unittest.SynchronousTestCase):
             pass
 
         getsNoHeader(self.request)
-        self.assertEqual(self.request.outgoingHeaders, {})
+        self.assertFalse(self.request.sortedResponseHeaders)

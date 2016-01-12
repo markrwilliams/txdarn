@@ -7,6 +7,7 @@ from twisted.internet import defer
 from twisted.trial import unittest
 from twisted.web import http
 from twisted.web import template
+from twisted.web import server, http
 from twisted.web.resource import Resource
 from twisted.web.test import requesthelper
 
@@ -14,8 +15,10 @@ from zope.interface import implementer
 from zope.interface.verify import verifyObject
 
 from txdarn import encoding
+from txdarn import protocol as P
 from txdarn import resources as R
 
+from .test_encoding import DummyRequestResponseHeaders
 
 SOCKJS_URL = u'http://someplace'
 SOCKJS_URL_BYTES = SOCKJS_URL.encode(encoding.ENCODING)
@@ -352,7 +355,7 @@ class IFrameResourceTestCase(unittest.SynchronousTestCase):
         self.assertEqual(len(messages), 1)
 
 
-class OptionsSubResourceTestCaseMixin:
+class OptionsTestCaseMixin:
 
     def test_options(self):
         request = requesthelper.DummyRequest([b'ignored'])
@@ -375,7 +378,7 @@ class OptionsSubResourceTestCaseMixin:
         self.assertFalse(written)
 
 
-class InfoResourceTestCase(OptionsSubResourceTestCaseMixin,
+class InfoResourceTestCase(OptionsTestCaseMixin,
                            unittest.TestCase):
     resourceClass = R.InfoResource
 
@@ -401,13 +404,222 @@ class InfoResourceTestCase(OptionsSubResourceTestCaseMixin,
         self.assertTrue(self._entropyCalled)
 
     def test_get(self):
-        request = requesthelper.DummyRequest([b'ignored'])
+        request = DummyRequestResponseHeaders([b'ignored'])
         request.method = b'GET'
 
         result = self.info.render(request)
 
+        contentType = (b'Content-Type',
+                       [b'application/json; charset=UTF-8'])
+
+        self.assertIn(contentType, request.sortedResponseHeaders)
         self.assertEqual({'websocket': self.config['websocketsEnabled'],
                           'cookie_needed': self.config['cookiesNeeded'],
                           'origins': ['*:*'],
                           'entropy': 42},
                          result)
+
+
+class RecordsSessionHouseActions(object):
+
+    def __init__(self):
+        self.requestsMaybeAttached = []
+        self.requestsMaybeWrittenTo = []
+
+
+class FakeSessionHouse(object):
+
+    def __init__(self, recorder):
+        self.recorder = recorder
+
+    def attachToSession(self, factory, request):
+        self.recorder.requestsMaybeAttached.append((factory, request))
+        return True
+
+    def writeToSession(self, request):
+        self.recorder.requestsMaybeWrittenTo.append(request)
+        return True
+
+
+class XHRResourceTestCase(OptionsTestCaseMixin, unittest.TestCase):
+    # XXX what test strategy for applyPolicies?  is there a better
+    # option than checking the serialized values of the headers?
+
+    def setUp(self):
+        self.fakeFactory = 'Fake Factory'
+        self.sessionRecorder = RecordsSessionHouseActions()
+        self.sessions = FakeSessionHouse(self.sessionRecorder)
+        self.timeout = 123.0
+        self.xhr = self.resourceClass()
+
+    def resourceClass(self):
+        return R.XHRResource(self.fakeFactory, self.sessions, self.timeout)
+
+    def test_postSuccess(self):
+        '''POSTing to an XHRResource results in a 200 and NOT_DONE_YET.'''
+        request = DummyRequestResponseHeaders([b'serverID',
+                                               b'sessionID',
+                                               b'xhr'])
+        request.method = b'POST'
+
+        result = self.xhr.render(request)
+
+        self.assertEqual(len(self.sessionRecorder.requestsMaybeAttached),
+                         1)
+        [(actualFactory,
+          actualRequest)] = self.sessionRecorder.requestsMaybeAttached
+
+        self.assertIsInstance(actualFactory, P.XHRSessionFactory)
+        self.assertIs(actualRequest, request)
+
+        contentType = (b'Content-Type',
+                       [b'application/javascript; charset=UTF-8'])
+
+        self.assertIn(contentType, request.sortedResponseHeaders)
+        self.assertIs(result, server.NOT_DONE_YET)
+
+    def test_postBadPath(self):
+        '''POSTing to an XHRResource without a final xhr path component
+         results in a 404.
+
+        '''
+        request = DummyRequestResponseHeaders([b'serverID',
+                                               b'sessionID',
+                                               b'blah'])
+        request.method = b'POST'
+
+        result = self.xhr.render(request)
+
+        contentType = (b'Content-Type',
+                       [b'application/javascript; charset=UTF-8'])
+
+        self.assertEqual(request.responseCode, http.NOT_FOUND)
+        self.assertIn(contentType, request.sortedResponseHeaders)
+        self.assertFalse(result)
+
+    def test_postAttachFails(self):
+        '''POSTing to an XHRResource results in a 404 when attachToSession
+        returns False.
+
+        '''
+        request = DummyRequestResponseHeaders([b'serverID',
+                                               b'sessionID',
+                                               b'xhr'])
+        request.method = b'POST'
+
+        def attachToSession(*args, **kwargs):
+            return False
+
+        self.sessions.attachToSession = attachToSession
+
+        result = self.xhr.render(request)
+
+        contentType = (b'Content-Type',
+                       [b'application/javascript; charset=UTF-8'])
+
+        self.assertEqual(request.responseCode, http.NOT_FOUND)
+        self.assertIn(contentType, request.sortedResponseHeaders)
+        self.assertFalse(result)
+
+
+class XHRSendResourceTestCase(OptionsTestCaseMixin, unittest.TestCase):
+
+    def setUp(self):
+        self.sessionRecorder = RecordsSessionHouseActions()
+        self.sessions = FakeSessionHouse(self.sessionRecorder)
+        self.xhrSend = self.resourceClass()
+
+    def resourceClass(self):
+        return R.XHRSendResource(self.sessions)
+
+    def test_postSuccess(self):
+        '''POSTing to the XHR send resource results in a 204 and an empty body
+        with the right content encoding.
+
+        '''
+        request = DummyRequestResponseHeaders([b'serverID',
+                                               b'sessionID',
+                                               b'xhr_send'])
+        request.method = b'POST'
+
+        result = self.xhrSend.render(request)
+
+        self.assertEqual(len(self.sessionRecorder.requestsMaybeWrittenTo),
+                         1)
+        [(actualRequest)] = self.sessionRecorder.requestsMaybeWrittenTo
+
+        self.assertIs(actualRequest, request)
+
+        contentType = (b'Content-Type',
+                       [b'text/plain; charset=UTF-8'])
+
+        self.assertEqual(request.responseCode, http.NO_CONTENT)
+        self.assertIn(contentType, request.sortedResponseHeaders)
+        self.assertNot(result)
+
+    def test_postBadPath(self):
+        '''POSTing to the XHR send resource without a final xhr_send path
+        component results in a 404.
+
+        '''
+        request = DummyRequestResponseHeaders([b'serverID',
+                                               b'sessionID',
+                                               b'blah'])
+        request.method = b'POST'
+
+        result = self.xhrSend.render(request)
+
+        contentType = (b'Content-Type',
+                       [b'text/plain; charset=UTF-8'])
+
+        self.assertEqual(request.responseCode, http.NOT_FOUND)
+        self.assertIn(contentType, request.sortedResponseHeaders)
+        self.assertFalse(result)
+
+    def test_postWriteFails(self):
+        '''POSTing to an XHRSendResource results in a 404 when attachToSession
+        returns False.
+
+        '''
+        request = DummyRequestResponseHeaders([b'serverID',
+                                               b'sessionID',
+                                               b'xhr_send'])
+        request.method = b'POST'
+
+        def writeToSession(*args, **kwargs):
+            return False
+
+        self.sessions.writeToSession = writeToSession
+
+        result = self.xhrSend.render(request)
+
+        contentType = (b'Content-Type',
+                       [b'text/plain; charset=UTF-8'])
+
+        self.assertEqual(request.responseCode, http.NOT_FOUND)
+        self.assertIn(contentType, request.sortedResponseHeaders)
+        self.assertFalse(result)
+
+    def test_postWriteRaisesInvalidData(self):
+        '''POSTing to an XHRSendResource results in a 500 when it receives
+        invalid data.
+
+        '''
+        request = DummyRequestResponseHeaders([b'serverID',
+                                               b'sessionID',
+                                               b'xhr_send'])
+        request.method = b'POST'
+
+        def writeToSession(*args, **kwargs):
+            raise P.InvalidData(b"It was bad!")
+
+        self.sessions.writeToSession = writeToSession
+
+        result = self.xhrSend.render(request)
+
+        contentType = (b'Content-Type',
+                       [b'text/plain; charset=UTF-8'])
+
+        self.assertEqual(request.responseCode, http.INTERNAL_SERVER_ERROR)
+        self.assertIn(contentType, request.sortedResponseHeaders)
+        self.assertEqual(result, b"It was bad!")
