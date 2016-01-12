@@ -47,6 +47,12 @@ class CompatTestCase(unittest.SynchronousTestCase):
                          b'native string to bytes')
 
     @skipIfVersion(not six.PY3)
+    def test_parse_http_list(self):
+        httpList = b'a, b, "c, d", e'
+        parsedHTTPList = [b'a', b'b', b'"c, d"', b'e']
+        self.assertEqual(C.parse_http_list(httpList), parsedHTTPList)
+
+    @skipIfVersion(not six.PY3)
     def test_networkStringFails_py3(self):
         with self.assertRaises(TypeError):
             C.networkString(b"i fail because i'm bytes")

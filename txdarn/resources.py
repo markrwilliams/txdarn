@@ -59,6 +59,7 @@ ONE_YEAR = 3153600
 
 
 def httpMultiValue(values):
+    # NB: you have to quote the values yourself
     return b', '.join(values)
 
 
@@ -135,18 +136,24 @@ def allowCredentials(policy, request, origin):
         return b'true'
 
 
+def allowHeaders(policy, request, allowedHeaders):
+    return allowedHeaders
+
+
 @implementer(IHeaderPolicy)
 class AccessControlPolicy(namedtuple('AccessControlPolicy',
                                      ['methods',
                                       'maxAge',
                                       'allowOrigin',
-                                      'allowCredentials'])):
+                                      'allowCredentials',
+                                      'allowHeaders'])):
 
     def __new__(cls, methods, maxAge,
                 allowOrigin=allowOrigin,
-                allowCredentials=allowCredentials):
+                allowCredentials=allowCredentials,
+                allowHeaders=allowHeaders):
         return super(AccessControlPolicy, cls).__new__(
-            cls, methods, maxAge, allowOrigin, allowCredentials)
+            cls, methods, maxAge, allowOrigin, allowCredentials, allowHeaders)
 
     def forResource(self, resource):
         if self.methods is INFERRED:
@@ -163,10 +170,16 @@ class AccessControlPolicy(namedtuple('AccessControlPolicy',
 
     def apply(self, request):
         origin = request.getHeader(b'origin')
+        requestHeaders = request.getHeader(b'access-control-request-headers')
+        if requestHeaders:
+            requestHeaders = compat.parse_http_list(requestHeaders)
+        else:
+            requestHeaders = []
 
         allowedOrigin = self.allowOrigin(self, request, origin)
         credentialsAllowed = self.allowCredentials(
             self, request, allowedOrigin)
+        allowedHeaders = self.allowHeaders(self, request, requestHeaders)
 
         methods = httpMultiValue(self.methods)
         maxAge = compat.networkString(str(self.maxAge))
@@ -178,6 +191,9 @@ class AccessControlPolicy(namedtuple('AccessControlPolicy',
         if credentialsAllowed:
             request.setHeader(b'access-control-allow-credentials',
                               credentialsAllowed)
+        if allowedHeaders:
+            request.setHeader(b'access-control-allow-headers',
+                              httpMultiValue(allowedHeaders))
 
         return request
 
