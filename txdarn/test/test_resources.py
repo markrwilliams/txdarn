@@ -172,6 +172,15 @@ class AccessControlPolicyTestCase(PolicyTestCase):
         self.assertIs(preparedAllowCredentials(None), None)
         self.assertEqual(preparedAllowCredentials(b'test'), b'true')
 
+    def test_allowHeaders(self):
+        '''allowHeaders just passes headers through.'''
+
+        preparedAllowHeaders = partial(R.allowHeaders,
+                                       self.dummyPolicy,
+                                       self.request)
+        self.assertEqual(preparedAllowHeaders([]), [])
+        self.assertEqual(preparedAllowHeaders([b'a']), [b'a'])
+
     def test_apply(self):
         expectedHeaders = {}
 
@@ -184,6 +193,9 @@ class AccessControlPolicyTestCase(PolicyTestCase):
         self.request.headers[b'origin'] = b'test'
         expectedHeaders[b'access-control-allow-origin'] = b'test'
         expectedHeaders[b'access-control-allow-credentials'] = b'true'
+
+        self.request.headers[b'access-control-request-headers'] = b'a, b, c'
+        expectedHeaders[b'access-control-allow-headers'] = b'a, b, c'
 
         policy = R.AccessControlPolicy(methods=methods,
                                        maxAge=maxAge)
