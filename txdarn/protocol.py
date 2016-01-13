@@ -173,14 +173,28 @@ class SockJSProtocolMachine(object):
         self.transport = None
 
     @_machine.output()
-    def _stopHeartbeat(self):
-        '''We lost our connection - stop our heartbeat.'''
+    def _stopHeartbeatWithReason(self, reason=DISCONNECT.GO_AWAY):
+        '''We lost our connection - stop our heartbeat.  This runs when the
+        protocol wants a disconnection.
+
+        This redundant output ensures that the heartbeater stops
+        immediately after the connection is lost.  Twisted will call
+        connectionLost after loseConnection, but between the two the
+        heartbeat-writing callback may run, after the transport's been
+        lost.  Relying on connectionLost to cancel our
+        callback thus creates a race condition.
+
+        '''
         self.heartbeater.stop()
         self.heartbeater = None
 
     @_machine.output()
-    def _stopHeartbeatWithReason(self, reason=DISCONNECT.GO_AWAY):
-        '''We lost our connection - stop our heartbeat.'''
+    def _stopHeartbeat(self):
+        '''We lost our connection - stop our heartbeat.  This runs when a
+        connection is lost.
+
+        '''
+        self.transport = None
         self.heartbeater.stop()
         self.heartbeater = None
 
@@ -483,11 +497,6 @@ class RequestSessionMachine(object):
             request.finish()
 
     @_machine.output()
-    def _closeRequestForDeadSession(self, request):
-        assert self.requestSession.request is None
-        request.finish()
-
-    @_machine.output()
     def _loseConnection(self):
         self.requestSession.completeLoseConnection()
 
@@ -629,16 +638,6 @@ class RequestSessionMachine(object):
     loseConnectionPending.upon(detach,
                                enter=loseConnectionPending,
                                outputs=[])
-
-    disconnected.upon(attach,
-                      enter=disconnected,
-                      outputs=[_closeRequestForDeadSession])
-    disconnected.upon(receive,
-                      enter=disconnected,
-                      outputs=[])
-    disconnected.upon(heartbeat,
-                      enter=disconnected,
-                      outputs=[])
 
 
 class TimeoutClock(object):
