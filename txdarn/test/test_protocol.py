@@ -3,11 +3,9 @@ import json
 from twisted.trial import unittest
 from twisted.internet.defer import Deferred
 from twisted.internet.protocol import Protocol, Factory
-from twisted.protocols.policies import WrappingFactory
 from twisted.test.proto_helpers import StringTransport
 from twisted.internet.task import Clock
 from twisted.internet.address import IPv4Address
-from twisted.internet.error import ConnectionDone
 # TODO: don't use twisted's private test APIs
 from twisted.web.test.requesthelper import DummyRequest
 from .. import protocol as P
@@ -399,18 +397,33 @@ class SockJSProtocolMachineTestCase(unittest.TestCase):
         self.assertEqual(self.sockJSMachine.receive(data), data)
 
     def test_disconnect(self):
-        '''SockJSProtocolMachine.disconnect writes a close frame, disconnects
-        the transport and cancels any pending heartbeats.
+        '''SockJSProtocolMachine.disconnect implements an active close: it
+        writes a close frame, disconnects the transport, and cancels
+        any pending heartbeats.
 
         '''
         self.sockJSMachine.connect(self.sockJSWireProtocol)
         self.sockJSMachine.disconnect(reason=P.DISCONNECT.GO_AWAY)
+
+        self.assertIs(None, self.sockJSMachine.transport)
 
         self.assertEqual(self.protocolRecorder.wroteOpen, 1)
         self.assertEqual(self.protocolRecorder.wroteClose,
                          [P.DISCONNECT.GO_AWAY])
         self.assertEqual(self.protocolRecorder.lostConnection, 1)
 
+        self.assertEqual(self.heartbeatRecorder.stopCalls, 1)
+
+    def test_close(self):
+        '''SockJSProtocolMachine.close implements a passive close: it drops
+        the transport and cancels any pending heartbeats.
+
+        '''
+        self.sockJSMachine.connect(self.sockJSWireProtocol)
+        self.sockJSMachine.close()
+
+        self.assertIs(None, self.sockJSMachine.transport)
+        self.assertEqual(self.protocolRecorder.wroteOpen, 1)
         self.assertEqual(self.heartbeatRecorder.stopCalls, 1)
 
 
