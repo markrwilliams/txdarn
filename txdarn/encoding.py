@@ -4,7 +4,6 @@ from .exceptions import TxDarnException
 # sockjs seems to mandate utf-8
 ENCODING = 'UTF-8'
 ENCODING_BYTES = ENCODING.encode('ascii')
-
 EMPTY = b''
 
 
@@ -32,9 +31,14 @@ class _contentTypeDecorator(object):
                               self.formattedContentType)
 
     def __call__(self, request, *args, **kwargs):
+        request.setHeader(b'Content-Type', self.formattedContentType)
         result = self.callableObject(request, *args, **kwargs)
-        if result or result is EMPTY:
-            request.setHeader(b'Content-Type', self.formattedContentType)
+        # XXX think about whether it makes sense to check that
+        # anything's been written.  t.w.http.Request.startedWriting
+        # appears to be a private API.
+        if not result and result is not EMPTY:
+            request.responseHeaders.removeHeader(b'Content-Type')
+
         return result
 
 
