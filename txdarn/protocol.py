@@ -9,6 +9,7 @@ python -c 'import sys, txdarn.protocol as P; \
       | dot -Tpng > machine.png
 '''
 
+from autobahn.twisted.websocket import WrappingWebSocketServerFactory
 from automat import MethodicalMachine
 
 import eliot
@@ -246,8 +247,8 @@ class SockJSWireProtocolWrapper(ProtocolWrapper):
         self.jsonDecoder = self.factory.jsonDecoder
         self.jsonEncoder = self.factory.jsonEncoder
 
-    def _jsonReceived(self, data):
-        self.wrappedProtocol.dataReceived(data)
+    def jsonReceived(self, decoded):
+        self.wrappedProtocol.dataReceived(decoded)
 
     def dataReceived(self, data):
         if not data:
@@ -258,7 +259,7 @@ class SockJSWireProtocolWrapper(ProtocolWrapper):
             except ValueError:
                 raise InvalidData(INVALID_DATA.BAD_JSON.value)
             else:
-                self._jsonReceived(decoded)
+                self.jsonReceived(decoded)
 
     def writeOpen(self):
         '''Write an open frame.'''
@@ -888,3 +889,47 @@ class XHRSession(RequestSessionProtocolWrapper):
 
 class XHRSessionFactory(RequestSessionWrappingFactory):
     protocol = XHRSession
+
+
+class WebSocketWrappingProtocol(SockJSWireProtocolWrapper):
+    connectionMade = False
+
+    def connectionMade(self, ):
+        if not self.connectionMade:
+            self.connectionMade = True
+            SockJSWireProtocolWrapper.makeConnection(self, self.transport)
+
+    def jsonReceived(self, decoded):
+        if decoded:
+            SockJSWireProtocolWrapper.jsonReceived(self, decoded)
+
+    def dataReceived(self, data):
+        try:
+            SockJSWireProtocolWrapper.dataReceived(self, data)
+        except InvalidData:
+            self.loseConnection()
+
+
+class WebSocketWrappingFactory(SockJSWireProtocolWrappingFactory):
+    protocol = WebSocketWrappingProtocol
+
+
+class WebSocketSessionFactory(WrappingWebSocketServerFactory):
+
+    def __init__(self, wrappedFactory, jsonEncoder=None, jsonDecoder=None,
+                 reactor=None,
+                 enableCompression=True,
+                 autoFragmentSize=0,
+                 subprotocol=None,
+                 debug=False):
+
+        sockJSWrappedFactory = WebSocketWrappingFactory(
+            wrappedFactory)
+        WrappingWebSocketServerFactory.__init__(
+            self,
+            sockJSWrappedFactory,
+            url=u'ws://localhost:8081',
+            reactor=reactor,
+            enableCompression=enableCompression,
+            subprotocol=debug,
+            debug=debug)
