@@ -9,7 +9,8 @@ python -c 'import sys, txdarn.protocol as P; \
       | dot -Tpng > machine.png
 '''
 
-from autobahn.twisted.websocket import WrappingWebSocketServerFactory
+from autobahn.twisted.websocket import (WrappingWebSocketServerFactory,
+                                        WrappingWebSocketServerProtocol)
 from automat import MethodicalMachine
 
 import eliot
@@ -891,13 +892,7 @@ class XHRSessionFactory(RequestSessionWrappingFactory):
     protocol = XHRSession
 
 
-class WebSocketWrappingProtocol(SockJSWireProtocolWrapper):
-    connectionMade = False
-
-    def connectionMade(self, ):
-        if not self.connectionMade:
-            self.connectionMade = True
-            SockJSWireProtocolWrapper.makeConnection(self, self.transport)
+class WebSocketProtocolWrapper(SockJSWireProtocolWrapper):
 
     def jsonReceived(self, decoded):
         if decoded:
@@ -911,7 +906,14 @@ class WebSocketWrappingProtocol(SockJSWireProtocolWrapper):
 
 
 class WebSocketWrappingFactory(SockJSWireProtocolWrappingFactory):
-    protocol = WebSocketWrappingProtocol
+    protocol = WebSocketProtocolWrapper
+
+
+class _WebSocketServerProtocol(WrappingWebSocketServerProtocol):
+
+    def _onConnect(self, request):
+        WrappingWebSocketServerProtocol._onConnect(self, request)
+        self._proto.makeConnection(self)
 
 
 class WebSocketSessionFactory(WrappingWebSocketServerFactory):
@@ -928,8 +930,15 @@ class WebSocketSessionFactory(WrappingWebSocketServerFactory):
         WrappingWebSocketServerFactory.__init__(
             self,
             sockJSWrappedFactory,
-            url=u'ws://localhost:8081',
+            url=u'ws://localhost',
             reactor=reactor,
             enableCompression=enableCompression,
             subprotocol=debug,
             debug=debug)
+
+    def buildProtocol(self, addr):
+        proto = _WebSocketServerProtocol()
+        proto.factory = self
+        proto._proto = self._factory.buildProtocol(addr)
+        proto._proto.transport = proto
+        return proto
