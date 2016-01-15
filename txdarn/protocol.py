@@ -9,7 +9,7 @@ python -c 'import sys, txdarn.protocol as P; \
       | dot -Tpng > machine.png
 '''
 
-from autobahn.websocket import protocol as websocketProtocol
+from autobahn.websocket import protocol as wsProtocol
 from autobahn.twisted.websocket import (WrappingWebSocketServerFactory,
                                         WrappingWebSocketServerProtocol)
 from automat import MethodicalMachine
