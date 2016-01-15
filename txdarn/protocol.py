@@ -9,6 +9,7 @@ python -c 'import sys, txdarn.protocol as P; \
       | dot -Tpng > machine.png
 '''
 
+from autobahn.websocket import protocol as websocketProtocol
 from autobahn.twisted.websocket import (WrappingWebSocketServerFactory,
                                         WrappingWebSocketServerProtocol)
 from automat import MethodicalMachine
@@ -264,23 +265,22 @@ class SockJSWireProtocolWrapper(ProtocolWrapper):
 
     def writeOpen(self):
         '''Write an open frame.'''
-        self.write(b'o\n')
+        self.write(b'o')
 
     def writeHeartbeat(self):
-        self.write(b'h\n')
+        self.write(b'h')
 
     @staticmethod
     def closeFrame(reason, jsonEncoder=None):
         frameValue = [b'c',
-                      sockJSJSON(reason.value, cls=jsonEncoder),
-                      b'\n']
+                      sockJSJSON(reason.value, cls=jsonEncoder)]
         return b''.join(frameValue)
 
     def writeClose(self, reason):
         self.write(self.closeFrame(reason, jsonEncoder=self.jsonEncoder))
 
     def writeData(self, data):
-        frameValue = [b'a', sockJSJSON(data, cls=self.jsonEncoder), b'\n']
+        frameValue = [b'a', sockJSJSON(data, cls=self.jsonEncoder)]
         frame = b''.join(frameValue)
         self.write(frame)
 
@@ -341,7 +341,7 @@ class SockJSProtocolFactory(WrappingFactory):
 
     protocol = SockJSProtocol
 
-    def __init__(self, wrappedFactory, heartbeatPeriod=1.0, clock=reactor):
+    def __init__(self, wrappedFactory, heartbeatPeriod=25.0, clock=reactor):
         WrappingFactory.__init__(self, wrappedFactory)
         self.heartbeatPeriod = heartbeatPeriod
         self.clock = clock
@@ -722,7 +722,7 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
         self.sessionMachine.detach()
 
     def write(self, data):
-        self.request.write(data)
+        self.request.write(data + b'\n')
 
     def dataReceived(self, data):
         self.sessionMachine.receive(data)
@@ -899,6 +899,8 @@ class WebSocketProtocolWrapper(SockJSWireProtocolWrapper):
             SockJSWireProtocolWrapper.jsonReceived(self, decoded)
 
     def dataReceived(self, data):
+        if not data:
+            return
         try:
             SockJSWireProtocolWrapper.dataReceived(self, data)
         except InvalidData:
@@ -911,9 +913,27 @@ class WebSocketWrappingFactory(SockJSWireProtocolWrappingFactory):
 
 class _WebSocketServerProtocol(WrappingWebSocketServerProtocol):
 
-    def _onConnect(self, request):
-        WrappingWebSocketServerProtocol._onConnect(self, request)
+    def onConnect(self, request):
+        self._binaryMode = any(b'binary' in p for p in request.protocols)
+
+    def onOpen(self):
         self._proto.makeConnection(self)
+
+    def write(self, data):
+        assert type(data) == bytes
+        if self._binaryMode:
+            self.sendMessage(data, isBinary=True)
+        else:
+            self.sendMessage(data, isBinary=False)
+
+    def onMessage(self, payload, isBinary):
+        if isBinary != self._binaryMode:
+            self.failConnection(
+                wsProtocol.WebSocketProtocol.CLOSE_STATUS_CODE_UNSUPPORTED_DATA,
+                "message payload type does not match the negotiated subprotocol")
+        else:
+            self._proto.dataReceived(payload)
+
 
 
 class WebSocketSessionFactory(WrappingWebSocketServerFactory):
@@ -933,7 +953,8 @@ class WebSocketSessionFactory(WrappingWebSocketServerFactory):
             url=u'ws://localhost',
             reactor=reactor,
             enableCompression=enableCompression,
-            subprotocol=debug,
+            autoFragmentSize=autoFragmentSize,
+            subprotocol=subprotocol,
             debug=debug)
 
     def buildProtocol(self, addr):
