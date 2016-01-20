@@ -9,6 +9,9 @@ python -c 'import sys, txdarn.protocol as P; \
       | dot -Tpng > machine.png
 '''
 
+import txaio
+txaio.use_twisted()
+
 from autobahn.websocket import protocol as WebSocketProtocol
 from autobahn.twisted.websocket import (WrappingWebSocketServerFactory,
                                         WrappingWebSocketServerProtocol)
