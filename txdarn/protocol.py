@@ -9,7 +9,7 @@ python -c 'import sys, txdarn.protocol as P; \
       | dot -Tpng > machine.png
 '''
 
-from autobahn.websocket import protocol as wsProtocol
+from autobahn.websocket import protocol as WebSocketProtocol
 from autobahn.twisted.websocket import (WrappingWebSocketServerFactory,
                                         WrappingWebSocketServerProtocol)
 from automat import MethodicalMachine
@@ -227,6 +227,11 @@ class SockJSProtocolMachine(object):
     connected.upon(close,
                    enter=disconnected,
                    outputs=[_stopHeartbeat])
+
+    # close should be idempotent
+    disconnected.upon(close,
+                      enter=disconnected,
+                      outputs=[])
 
 
 class InvalidData(TxDarnProtocolException):
@@ -929,11 +934,11 @@ class _WebSocketServerProtocol(WrappingWebSocketServerProtocol):
     def onMessage(self, payload, isBinary):
         if isBinary != self._binaryMode:
             self.failConnection(
-                wsProtocol.WebSocketProtocol.CLOSE_STATUS_CODE_UNSUPPORTED_DATA,
-                "message payload type does not match the negotiated subprotocol")
+                WebSocketProtocol.CLOSE_STATUS_CODE_UNSUPPORTED_DATA,
+                "message payload type does not match"
+                " the negotiated subprotocol")
         else:
             self._proto.dataReceived(payload)
-
 
 
 class WebSocketSessionFactory(WrappingWebSocketServerFactory):
@@ -950,7 +955,7 @@ class WebSocketSessionFactory(WrappingWebSocketServerFactory):
         WrappingWebSocketServerFactory.__init__(
             self,
             sockJSWrappedFactory,
-            url=u'ws://localhost',
+            url=u'ws://localhost:8081',
             reactor=reactor,
             enableCompression=enableCompression,
             autoFragmentSize=autoFragmentSize,
