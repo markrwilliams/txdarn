@@ -275,14 +275,13 @@ class SockJSWireProtocolWrapper(ProtocolWrapper):
     def writeHeartbeat(self):
         self.write(b'h')
 
-    @staticmethod
-    def closeFrame(reason, jsonEncoder=None):
+    def closeFrame(self, reason):
         frameValue = [b'c',
-                      sockJSJSON(reason.value, cls=jsonEncoder)]
+                      sockJSJSON(reason.value, cls=self.jsonEncoder)]
         return b''.join(frameValue)
 
     def writeClose(self, reason):
-        self.write(self.closeFrame(reason, jsonEncoder=self.jsonEncoder))
+        self.write(self.closeFrame(reason))
 
     def writeData(self, data):
         frameValue = [b'a', sockJSJSON(data, cls=self.jsonEncoder)]
@@ -499,10 +498,8 @@ class RequestSessionMachine(object):
     @_machine.output()
     def _closeDuplicateRequest(self, request):
         if request is not self.requestSession.request:
-            message = self.requestSession.closeFrame(DISCONNECT.STILL_OPEN)
-            request.write(message)
-            request.finish()
-
+            self.requestSession.closeOtherRequest(request,
+                                                  DISCONNECT.STILL_OPEN)
     @_machine.output()
     def _loseConnection(self):
         self.requestSession.completeLoseConnection()
@@ -514,8 +511,8 @@ class RequestSessionMachine(object):
     @_machine.output()
     def _writeCloseReason(self, request):
         if self._closeReason:
-            request.write(self.requestSession.closeFrame(self._closeReason))
-        request.finish()
+            self.requestSession.closeOtherRequest(request,
+                                                  self._closeReason)
 
     @_machine.output()
     def _dropRequest(self, reason=protocol.connectionDone):
@@ -728,6 +725,10 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
 
     def write(self, data):
         self.request.write(data + b'\n')
+
+    def closeOtherRequest(self, request, reason):
+        request.write(self.closeFrame(reason) + b'\n')
+        request.finish()
 
     def dataReceived(self, data):
         self.sessionMachine.receive(data)
@@ -955,7 +956,7 @@ class WebSocketSessionFactory(WrappingWebSocketServerFactory):
         WrappingWebSocketServerFactory.__init__(
             self,
             sockJSWrappedFactory,
-            url=u'ws://localhost:8081',
+            url=None,
             reactor=reactor,
             enableCompression=enableCompression,
             autoFragmentSize=autoFragmentSize,

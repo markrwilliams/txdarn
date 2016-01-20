@@ -1,3 +1,4 @@
+from twisted.internet import reactor
 from twisted.internet.protocol import Factory, Protocol
 
 from txdarn.application import TxDarn
