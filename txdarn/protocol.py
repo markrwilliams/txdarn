@@ -685,6 +685,7 @@ class TimeoutClock(object):
     def stop(self):
         if not self.expired and self.timeoutCall is not None:
             self.timeoutCall.cancel()
+            self.timeoutCall = None
 
 
 class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):

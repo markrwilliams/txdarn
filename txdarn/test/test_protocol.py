@@ -867,9 +867,8 @@ class TimeoutClockTestCase(unittest.TestCase):
 
         self.clock.advance(self.length * 2)
 
-        def assertTimedOutAndCannotRestart(_):
+        def assertTimedOutAndCannotRestartOrStop(_):
             self.assertFalse(self.clock.getDelayedCalls())
-
             self.assertIsNone(self.timeoutClock.timeoutCall)
 
             with self.assertRaises(RuntimeError):
@@ -878,7 +877,12 @@ class TimeoutClockTestCase(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.timeoutClock.reset()
 
-        self.timeoutDeferred.addCallback(assertTimedOutAndCannotRestart)
+            # no effect
+            self.timeoutClock.stop()
+            self.assertFalse(self.clock.getDelayedCalls())
+            self.assertIsNone(self.timeoutClock.timeoutCall)
+
+        self.timeoutDeferred.addCallback(assertTimedOutAndCannotRestartOrStop)
         return self.timeoutDeferred
 
     def test_reset_interrupts(self):
@@ -896,3 +900,18 @@ class TimeoutClockTestCase(unittest.TestCase):
         resetPendingExecution = self.timeoutClock.timeoutCall
         self.assertIsNot(pendingExpiration, resetPendingExecution)
         self.assertEqual(self.clock.getDelayedCalls(), [])
+
+    def test_stop(self):
+        '''A stop() call to the stops the pending timeout and is idempotent.
+        '''
+        self.timeoutClock.start()
+        pendingExpiration = self.timeoutClock.timeoutCall
+        self.assertEqual(self.clock.getDelayedCalls(), [pendingExpiration])
+
+        self.timeoutClock.stop()
+        self.assertEqual(self.clock.getDelayedCalls(), [])
+        self.assertIsNone(self.timeoutClock.timeoutCall)
+
+        self.timeoutClock.stop()
+        self.assertEqual(self.clock.getDelayedCalls(), [])
+        self.assertIsNone(self.timeoutClock.timeoutCall)
