@@ -458,7 +458,7 @@ class RequestSessionMachine(object):
 
     @_machine.output()
     def _completeConnection(self, request):
-        self.requestSession.completeConnection(request)
+        self.requestSession.completeConnection()
 
     @_machine.output()
     def _beginRequest(self, request):
@@ -503,6 +503,7 @@ class RequestSessionMachine(object):
         if request is not self.requestSession.request:
             self.requestSession.closeOtherRequest(request,
                                                   DISCONNECT.STILL_OPEN)
+
     @_machine.output()
     def _loseConnection(self):
         self.requestSession.completeLoseConnection()
@@ -785,7 +786,7 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
         protocol.Protocol.makeConnection(self, request.transport)
         self.factory.registerProtocol(self)
 
-    def completeConnection(self, request):
+    def completeConnection(self):
         self.wrappedProtocol.makeConnection(self)
 
     def completeDataReceived(self, data):
