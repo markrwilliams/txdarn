@@ -1,8 +1,9 @@
 import json
 
 from twisted.trial import unittest
+from twisted.internet import error
 from twisted.internet.defer import Deferred
-from twisted.internet.protocol import Protocol, Factory
+from twisted.internet.protocol import Protocol, Factory, connectionDone
 from twisted.test.proto_helpers import StringTransport
 from twisted.internet.task import Clock
 from twisted.internet.address import IPv4Address
@@ -541,7 +542,7 @@ class RecordsRequestSessionActions(object):
         self.connectionsCompletelyLost = []
 
 
-class FakeRequestSessionMachine(object):
+class FakeRequestSessionProtocolWrapper(object):
 
     def __init__(self, recorder):
         self.recorder = recorder
@@ -608,7 +609,8 @@ class RequestSessionMachineTestCase(unittest.TestCase):
 
     def setUp(self):
         self.recorder = RecordsRequestSessionActions()
-        self.fakeRequestSession = FakeRequestSessionMachine(self.recorder)
+        self.fakeRequestSession = FakeRequestSessionProtocolWrapper(
+            self.recorder)
         self.requestSessionMachine = P.RequestSessionMachine(
             self.fakeRequestSession)
 
@@ -915,3 +917,239 @@ class TimeoutClockTestCase(unittest.TestCase):
         self.timeoutClock.stop()
         self.assertEqual(self.clock.getDelayedCalls(), [])
         self.assertIsNone(self.timeoutClock.timeoutCall)
+
+
+class RecordsTimeoutClockActions(object):
+    startCalls = 0
+    stopCalls = 0
+    resetCalls = 0
+
+
+class FakeTimeoutClock(object):
+
+    def __init__(self, recorder):
+        self.recorder = recorder
+
+    def start(self):
+        self.recorder.startCalls += 1
+
+    def stop(self):
+        self.recorder.stopCalls += 1
+
+    def reset(self):
+        self.recorder.resetCalls += 1
+
+
+class RecordsSessionMachineActions(object):
+
+    def __init__(self):
+        self.attachedRequests = []
+        self.detachCalls = 0
+        self.dataWritten = []
+        self.receivedData = []
+        self.closeReasonsWritten = []
+        self.heartbeatCalls = 0
+        self.loseConnectionCalls = 0
+        self.connectionsLostReasons = []
+
+
+class FakeRequestSessionMachine(object):
+
+    def __init__(self, recorder):
+        self.recorder = recorder
+
+    def attach(self, request):
+        self.recorder.attachedRequests.append(request)
+
+    def detach(self):
+        self.recorder.detachCalls += 1
+
+    def write(self, data):
+        self.recorder.dataWritten.append(data)
+
+    def receive(self, data):
+        self.recorder.receivedData.append(data)
+
+    def writeClose(self, reason):
+        self.recorder.closeReasonsWritten.append(reason)
+
+    def heartbeat(self):
+        self.recorder.heartbeatCalls += 1
+
+    def loseConnection(self):
+        self.recorder.loseConnectionCalls += 1
+
+    def connectionLost(self, reason):
+        self.recorder.connectionsLostReasons.append(reason)
+
+
+class RequestSessionProtocolWrapperTestCase(unittest.TestCase):
+    '''Tests for the ProtocolWrapper that adapts a
+    twisted.web.server.Request to a SockJS polling transport.
+
+    '''
+
+    def setUp(self):
+        self.receivedData = []
+
+        self.timeoutClockRecorder = RecordsTimeoutClockActions()
+        self.timeoutClock = FakeTimeoutClock(self.timeoutClockRecorder)
+
+        self.sessionMachineRecorder = RecordsSessionMachineActions()
+        self.sessionMachine = FakeRequestSessionMachine(
+            self.sessionMachineRecorder)
+
+        self.wrappedFactory = RecordingProtocolFactory(self.receivedData)
+        self.factory = P.RequestSessionWrappingFactory(self.wrappedFactory)
+        self.factory.timeoutClockFactory = self.fakeTimeoutClockFactory
+        self.factory.sessionMachineFactory = self.fakeSessionMachineFactory
+
+        self.address = IPv4Address('TCP', '127.0.0.1', 80)
+        self.protocol = self.factory.buildProtocol(self.address)
+        self.request = DummyRequest([b'ignored'])
+
+    def fakeTimeoutClockFactory(self, terminationDeferred):
+        return self.timeoutClock
+
+    def fakeSessionMachineFactory(self, protocol):
+        return self.sessionMachine
+
+    def test_makeConnection_fails(self):
+        '''You can't call makeConnection on a
+        RequestSessionProtocolWrapper.
+
+        '''
+        with self.assertRaises(RuntimeError):
+            self.protocol.makeConnection('ignored')
+
+    def test_attached(self):
+        '''The attached property returns True iff a request is attached.'''
+
+        self.assertFalse(self.protocol.request)
+        self.assertFalse(self.protocol.attached)
+        self.protocol.request = self.request
+        self.assertTrue(self.protocol.attached)
+
+    def test_makeConnectionFromRequest(self):
+        '''makeConnectionFromRequest has the session state machine attach the
+        request.
+
+        '''
+        self.protocol.makeConnectionFromRequest(self.request)
+        self.assertEqual(self.sessionMachineRecorder.attachedRequests,
+                         [self.request])
+
+    def test_detachFromRequest(self):
+        '''detachFromRequest has the session state machine perform the detach.
+
+        '''
+        self.protocol.detachFromRequest()
+        self.assertEqual(self.sessionMachineRecorder.detachCalls, 1)
+
+    def test_write(self):
+        '''write adds a newline before writing the data to the current
+        request.
+
+        '''
+        self.protocol.request = self.request
+        self.protocol.write(b'something')
+        self.assertEqual(self.request.written, [b'something\n'])
+
+    def test_closeOtherRequest(self):
+        '''closeOtherRequest writes a close frame consisting of a reason and a
+        newline to a request.
+
+        '''
+        self.protocol.closeOtherRequest(self.request, P.DISCONNECT.GO_AWAY)
+        self.assertEqual(self.request.written, [b'c[3000,"Go away!"]\n'])
+
+    def test_dataReceived(self):
+        '''dataReceived passes the data off to the session state machine.
+
+        '''
+        self.protocol.dataReceived('something')
+        self.assertEqual(self.sessionMachineRecorder.receivedData,
+                         ['something'])
+
+    def test_writeData(self):
+        '''writeData passes the data off to the session state machine.'''
+        self.protocol.writeData('something')
+        self.assertEqual(self.sessionMachineRecorder.dataWritten,
+                         ['something'])
+
+    def test_writeHeartbeat(self):
+        '''writeHeartbeat has the session state machine write a heartbeat.'''
+        self.protocol.writeHeartbeat()
+        self.assertEqual(self.sessionMachineRecorder.heartbeatCalls, 1)
+
+    def test_writeClose(self):
+        '''writeClose has the session state machine close the request.'''
+        self.protocol.writeClose("reason")
+        self.assertEqual(self.sessionMachineRecorder.closeReasonsWritten,
+                         ["reason"])
+
+    def test_loseConnection(self):
+        '''loseConnection tells the session state machine to lose the
+        connection and the timeout clock to start, but does both only once.
+
+        '''
+        self.protocol.loseConnection()
+        self.assertTrue(self.protocol.disconnecting)
+        self.assertEqual(self.sessionMachineRecorder.loseConnectionCalls, 1)
+        self.assertEqual(self.timeoutClockRecorder.startCalls, 1)
+
+        self.protocol.loseConnection()
+        self.assertTrue(self.protocol.disconnecting)
+        self.assertEqual(self.sessionMachineRecorder.loseConnectionCalls, 1)
+        self.assertEqual(self.timeoutClockRecorder.startCalls, 1)
+
+    def test_connectionLost_disconnecting(self):
+        '''If connectionLost has been called after loseConnection, then this
+        connection will linger in a disconnected state until the
+        timeout expires.  The protocol's terminationDeferred does not
+        fire and the timeout clock is not stopped, but the session
+        machine learns about the lost connection.
+
+        '''
+        self.protocol.disconnecting = 1
+        self.protocol.connectionLost("reason")
+        unfiredDeferred = self.protocol.terminationDeferred
+        with self.assertRaises(AttributeError):
+            unfiredDeferred.result
+
+        self.assertFalse(self.timeoutClockRecorder.stopCalls)
+        self.assertEqual(self.sessionMachineRecorder.connectionsLostReasons,
+                         ['reason'])
+        self.assertIsNone(self.protocol.sessionMachine)
+
+    def test_connectionLost_clientClose(self):
+        '''If connectionLost is called because the client closed the
+        connection, then this connection has disappeared suddenly.
+        Consequently, the protocol's terminationDeferred errbacks with
+        the provided reason, the timeout clock is stopped, and the
+        session machine learns about the lost connection.
+
+        '''
+        erroredDeferred = self.protocol.terminationDeferred
+
+        def trapConnectionDone(failure):
+            failure.trap(error.ConnectionDone)
+
+        erroredDeferred.addErrback(trapConnectionDone)
+
+        self.protocol.connectionLost(connectionDone)
+
+        self.assertEqual(self.timeoutClockRecorder.stopCalls, 1)
+        self.assertEqual(self.sessionMachineRecorder.connectionsLostReasons,
+                         [connectionDone])
+        self.assertIsNone(self.protocol.sessionMachine)
+
+        return erroredDeferred
+
+    def test_consumerProducer_notImplemented(self):
+        '''Registration of consumers and producers is not implemented.'''
+        with self.assertRaises(NotImplementedError):
+            self.protocol.registerProducer(None, None)
+
+        with self.assertRaises(NotImplementedError):
+            self.protocol.unregisterProducer()

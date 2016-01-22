@@ -698,6 +698,7 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
     This is the base class for polling SockJS transports
 
     """
+    terminationDeferred = None
     request = None
     finishedNotifier = None
 
@@ -707,7 +708,7 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
         self.terminationDeferred = defer.Deferred()
         self.terminationDeferred.addCallback(self._timedOut)
 
-        self.sessionMachine = RequestSessionMachine(self)
+        self.sessionMachine = self.factory.sessionMachineFactory(self)
         self.timeoutClock = self.factory.timeoutClockFactory(
             self.terminationDeferred)
 
@@ -752,6 +753,13 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
             self.sessionMachine.loseConnection()
             self.timeoutClock.start()
 
+    def connectionLost(self, reason=protocol.connectionDone):
+        if not self.disconnecting:
+            self.terminationDeferred.errback(reason)
+            self.timeoutClock.stop()
+        self.sessionMachine.connectionLost(reason)
+        self.sessionMachine = None
+
     def registerProducer(self, producer, streaming):
         # TODO: implement this!
         raise NotImplementedError
@@ -765,13 +773,6 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
         # great
         self.disconnecting = 1
         self.connectionLost()
-
-    def connectionLost(self, reason=protocol.connectionDone):
-        if not self.disconnecting:
-            self.terminationDeferred.errback(reason)
-            self.timeoutClock.stop()
-        self.sessionMachine.connectionLost(reason)
-        self.sessionMachine = None
 
     def beginRequest(self):
         self.finishedNotifier = self.request.notifyFinish()
@@ -787,11 +788,11 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
     def completeConnection(self, request):
         self.wrappedProtocol.makeConnection(self)
 
-    def completeWrite(self, data):
-        SockJSWireProtocolWrapper.writeData(self, data)
-
     def completeDataReceived(self, data):
         SockJSWireProtocolWrapper.dataReceived(self, data)
+
+    def completeWrite(self, data):
+        SockJSWireProtocolWrapper.writeData(self, data)
 
     def completeHeartbeat(self):
         SockJSWireProtocolWrapper.writeHeartbeat(self)
@@ -821,6 +822,9 @@ class RequestSessionWrappingFactory(SockJSWireProtocolWrappingFactory):
                                                    jsonEncoder=jsonEncoder,
                                                    jsonDecoder=jsonDecoder)
         self.timeout = timeout
+
+    def sessionMachineFactory(self, protocol):
+        return RequestSessionMachine(protocol)
 
     def timeoutClockFactory(self, terminationDeferred):
         return TimeoutClock(terminationDeferred, self.timeout)
