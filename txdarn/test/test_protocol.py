@@ -1,3 +1,4 @@
+import io
 import json
 
 from twisted.trial import unittest
@@ -541,7 +542,11 @@ class RecordsRequestSessionActions(object):
         self.connectionsEstablished = []
         self.connectionsCompleted = 0
         self.requestsBegun = 0
+        # TODO - these next two are needlessly confusing -- rename one
+        # or both!
+        self.receivedData = []
         self.dataReceived = []
+
         self.completelyWritten = []
         self.otherRequestsClosed = []
         self.dataWritten = []
@@ -549,12 +554,14 @@ class RecordsRequestSessionActions(object):
         self.currentRequestsFinished = 0
         self.connectionsLostCompletely = 0
         self.connectionsCompletelyLost = []
+        self.connectionsMadeFromRequest = []
 
 
 class FakeRequestSessionProtocolWrapper(object):
 
     def __init__(self, recorder):
         self.recorder = recorder
+        self.terminationDeferred = Deferred()
 
     @property
     def request(self):
@@ -563,6 +570,9 @@ class FakeRequestSessionProtocolWrapper(object):
     @request.setter
     def request(self, request):
         self.recorder.request = request
+
+    def makeConnectionFromRequest(self, request):
+        self.recorder.connectionsMadeFromRequest.append(request)
 
     def establishConnection(self, request):
         self.recorder.connectionsEstablished.append(request)
@@ -578,6 +588,9 @@ class FakeRequestSessionProtocolWrapper(object):
 
     def closeOtherRequest(self, request, reason):
         self.recorder.otherRequestsClosed.append((request, reason))
+
+    def dataReceived(self, data):
+        self.recorder.receivedData.append(data)
 
     def writeData(self, data):
         self.recorder.dataWritten.append(data)
@@ -1343,3 +1356,110 @@ class RequestSessionProtocolWrapperTestCase(unittest.TestCase):
 
         terminationDeferred.callback(P.TimeoutClock.EXPIRED)
         return terminationDeferred
+
+
+class SessionHouseTestCase(unittest.TestCase):
+
+    def setUp(self):
+        self.sessions = P.SessionHouse()
+        self.sessionID = b'session'
+        self.request = DummyRequest([b'server', self.sessionID, b'ignored'])
+        self.request.transport = StringTransport()
+
+        self.recorder = RecordsRequestSessionActions()
+        self.protocol = FakeRequestSessionProtocolWrapper(self.recorder)
+
+    def buildProtocol(self, address):
+        return self.protocol
+
+    def test_validateAndExtraSessionID(self):
+        '''Invalid server or session IDs result in None, while valid ones
+        result in a sessionID.
+
+        '''
+        noIDs = DummyRequest([])
+        self.assertIsNone(self.sessions.validateAndExtractSessionID(noIDs))
+
+        emptyIDs = DummyRequest([b'', b'', b''])
+        self.assertIsNone(self.sessions.validateAndExtractSessionID(emptyIDs))
+
+        hasDot = DummyRequest([b'server', b'session', b'has.thatdot'])
+        self.assertIsNone(self.sessions.validateAndExtractSessionID(hasDot))
+
+        self.assertEqual(
+            self.sessions.validateAndExtractSessionID(self.request),
+            b'session')
+
+    def test_attachToSession_returns_False(self):
+        '''attachToSession returns False if a request with invalid IDs
+        attempts to attaches to a session.
+
+        '''
+        self.assertFalse(self.sessions.attachToSession(self, DummyRequest([])))
+
+    def test_attachToSession_new_session(self):
+        '''attachToSession creates a new session when given a request with a
+        novel and valid session ID.
+
+        '''
+        self.assertTrue(self.sessions.attachToSession(self, self.request))
+        self.assertIs(self.sessions.sessions[self.sessionID], self.protocol)
+        self.assertEqual(self.recorder.connectionsMadeFromRequest,
+                         [self.request])
+
+    def test_sessionClosed_on_callback(self):
+        '''Firing the protocol's terminationDeferred removes the session from
+        the house.
+
+        '''
+        self.test_attachToSession_new_session()
+        self.protocol.terminationDeferred.callback(None)
+        self.assertNotIn(self.sessionID, self.sessions.sessions)
+        return self.protocol.terminationDeferred
+
+    def test_sessionClosed_on_errback(self):
+        '''Errbacking the protocol's terminationDeferred removes the session
+        from the house.
+
+        '''
+        self.test_attachToSession_new_session()
+        self.protocol.terminationDeferred.errback(connectionDone)
+        self.assertNotIn(self.sessionID, self.sessions.sessions)
+        return self.protocol.terminationDeferred
+
+    def test_attachToSession_existing_session(self):
+        '''attachToSession returns the existing session when given a request
+        with a duplicate and valid session ID.
+
+        '''
+        self.test_attachToSession_new_session()
+        self.assertTrue(self.sessions.attachToSession(self, self.request))
+        self.assertIs(self.sessions.sessions[self.sessionID], self.protocol)
+        self.assertEqual(self.recorder.connectionsMadeFromRequest,
+                         [self.request, self.request])
+
+    def test_writeToSession_returns_false(self):
+        '''writeToSession with an invalid session ID returns False.'''
+        self.assertFalse(self.sessions.writeToSession(DummyRequest([])))
+
+    def test_writeToSession_missing_session(self):
+        '''writingToSession with valid but unknown session ID returns False.'''
+        unknownSession = self.sessionID * 2
+
+        self.assertFalse(self.sessions.writeToSession(
+            DummyRequest([b'server',
+                          unknownSession,
+                          b'ignored'])))
+
+    def test_writeToSession_existing_session(self):
+        '''writeToSession with a valid and known session ID returns True and
+        passes the request's content to the session's dataReceived.
+
+        '''
+        data = b'some data!'
+        self.request.content = io.BytesIO(data)
+
+        self.test_attachToSession_new_session()
+
+        self.assertTrue(self.sessions.writeToSession(self.request))
+        self.assertEqual(self.recorder.receivedData, [data])

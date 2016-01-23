@@ -849,7 +849,7 @@ class SessionHouse(object):
         return sessionID
 
     def makeSession(self, sessionID, factory, request):
-        protocol = factory.buildProtocol(request.transport.getHost())
+        protocol = factory.buildProtocol(request.transport.getPeer())
 
         protocol.terminationDeferred.addBoth(self._sessionClosed, sessionID)
         protocol.terminationDeferred.addErrback(eliot.writeFailure)
