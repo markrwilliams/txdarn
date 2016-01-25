@@ -73,7 +73,7 @@ class TxDarn(object):
         def xhr_streaming(self, request, serverID, sessionID):
             request.postpath = [_convertPostpathString(serverID),
                                 _convertPostpathString(sessionID),
-                                b'xhr']
+                                b'xhr_streaming']
             return self._xhrStreamingResource
 
         @sessionApp.route('/xhr_send')
