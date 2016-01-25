@@ -1504,6 +1504,38 @@ class XHRSessionTestCase(RequestSessionProtocolWrapperTestCase):
         self.assertEqual(self.sessionMachineRecorder.detachCalls, 1)
 
 
+class XHRStreamingSessionTestCase(RequestSessionProtocolWrapperTestCase):
+    maximumBytes = 128
+
+    def makeFactory(self):
+        return P.XHRStreamingSessionFactory(maximumBytes=self.maximumBytes,
+                                            wrappedFactory=self.wrappedFactory)
+
+    def test_writeOpen(self):
+        '''XHRStreamingSession writes a large prelude when establishing a
+        connection.
+
+        '''
+        self.protocol.request = self.request
+        self.protocol.writeOpen()
+        self.assertEqual(self.request.written, [b'h' * 2048 + b'\n',
+                                                b'o\n'])
+        self.assertEqual(self.sessionMachineRecorder.detachCalls, 0)
+
+    def test_writeData(self):
+        '''XHRStreamingSession detaches the request after writing at least
+        maximumBytes.
+
+        '''
+        self.protocol.request = self.request
+
+        self.protocol.writeData(['ignored'])
+        self.assertEqual(self.sessionMachineRecorder.detachCalls, 0)
+
+        self.protocol.writeData(['ignored' * self.maximumBytes])
+        self.assertEqual(self.sessionMachineRecorder.detachCalls, 1)
+
+
 class WebSocketProtocolWrapperTestCase(SockJSWireProtocolWrapperTestCase):
 
     def makeFactory(self):

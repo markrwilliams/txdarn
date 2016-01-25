@@ -1,4 +1,3 @@
-from twisted.internet import reactor
 from twisted.internet.protocol import Factory, Protocol
 
 from txdarn.application import TxDarn
@@ -32,7 +31,8 @@ class AmplifyProtocol(Protocol):
 options = {
     'sockjs-url': 'https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.0.3/sockjs.js',
     'websockets': True,
-    'timeout': 5.0}
+    'timeout': 5.0,
+    'maximumBytes': 4096}
 darnit = TxDarn(Factory.forProtocol(EchoProtocol), options)
 darnitClose = TxDarn(Factory.forProtocol(CloseProtocol), options)
 
