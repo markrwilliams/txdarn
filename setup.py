@@ -15,6 +15,6 @@ setup(name='txdarn',
       install_requires=['Twisted>=15.5.0',
                         'eliot',
                         'six',
-                        'autobahn',
+                        'autobahn>0.11.0',
                         'klein',
                         'automat>=0.3.0'])

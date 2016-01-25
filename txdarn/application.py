@@ -1,3 +1,5 @@
+from autobahn.twisted.resource import WebSocketResource
+
 from txdarn import resources as R
 from txdarn import protocol as P
 from txdarn import compat
@@ -36,6 +38,9 @@ class TxDarn(object):
                                           timeout=config['timeout'])
         self._xhrSendResource = R.XHRSendResource(self._sessions)
 
+        websocketFactory = P.WebSocketSessionFactory(self._sockJSFactory)
+        self._websocketResource = WebSocketResource(websocketFactory)
+
     @app.route('/', strict_slashes=False)
     def greeting(self, request):
         return self._greeting
@@ -63,3 +68,7 @@ class TxDarn(object):
                                 _convertPostpathString(sessionID),
                                 b'xhr_send']
             return self._xhrSendResource
+
+        @sessionApp.route('/websocket')
+        def websocket(self, request, serverID, sessionID):
+            return self._websocketResource

@@ -9,6 +9,12 @@ python -c 'import sys, txdarn.protocol as P; \
       | dot -Tpng > machine.png
 '''
 
+import txaio
+txaio.use_twisted()
+
+from autobahn.websocket.protocol import WebSocketProtocol
+from autobahn.twisted.websocket import (WrappingWebSocketServerFactory,
+                                        WrappingWebSocketServerProtocol)
 from automat import MethodicalMachine
 
 import eliot
@@ -225,6 +231,11 @@ class SockJSProtocolMachine(object):
                    enter=disconnected,
                    outputs=[_stopHeartbeat])
 
+    # close should be idempotent
+    disconnected.upon(close,
+                      enter=disconnected,
+                      outputs=[])
+
 
 class InvalidData(TxDarnProtocolException):
     '''Received invalid JSON.'''
@@ -246,8 +257,8 @@ class SockJSWireProtocolWrapper(ProtocolWrapper):
         self.jsonDecoder = self.factory.jsonDecoder
         self.jsonEncoder = self.factory.jsonEncoder
 
-    def _jsonReceived(self, data):
-        self.wrappedProtocol.dataReceived(data)
+    def jsonReceived(self, decoded):
+        self.wrappedProtocol.dataReceived(decoded)
 
     def dataReceived(self, data):
         if not data:
@@ -258,27 +269,25 @@ class SockJSWireProtocolWrapper(ProtocolWrapper):
             except ValueError:
                 raise InvalidData(INVALID_DATA.BAD_JSON.value)
             else:
-                self._jsonReceived(decoded)
+                self.jsonReceived(decoded)
 
     def writeOpen(self):
         '''Write an open frame.'''
-        self.write(b'o\n')
+        self.write(b'o')
 
     def writeHeartbeat(self):
-        self.write(b'h\n')
+        self.write(b'h')
 
-    @staticmethod
-    def closeFrame(reason, jsonEncoder=None):
+    def closeFrame(self, reason):
         frameValue = [b'c',
-                      sockJSJSON(reason.value, cls=jsonEncoder),
-                      b'\n']
+                      sockJSJSON(reason.value, cls=self.jsonEncoder)]
         return b''.join(frameValue)
 
     def writeClose(self, reason):
-        self.write(self.closeFrame(reason, jsonEncoder=self.jsonEncoder))
+        self.write(self.closeFrame(reason))
 
     def writeData(self, data):
-        frameValue = [b'a', sockJSJSON(data, cls=self.jsonEncoder), b'\n']
+        frameValue = [b'a', sockJSJSON(data, cls=self.jsonEncoder)]
         frame = b''.join(frameValue)
         self.write(frame)
 
@@ -339,7 +348,7 @@ class SockJSProtocolFactory(WrappingFactory):
 
     protocol = SockJSProtocol
 
-    def __init__(self, wrappedFactory, heartbeatPeriod=1.0, clock=reactor):
+    def __init__(self, wrappedFactory, heartbeatPeriod=25.0, clock=reactor):
         WrappingFactory.__init__(self, wrappedFactory)
         self.heartbeatPeriod = heartbeatPeriod
         self.clock = clock
@@ -449,7 +458,7 @@ class RequestSessionMachine(object):
 
     @_machine.output()
     def _completeConnection(self, request):
-        self.requestSession.completeConnection(request)
+        self.requestSession.completeConnection()
 
     @_machine.output()
     def _beginRequest(self, request):
@@ -492,9 +501,8 @@ class RequestSessionMachine(object):
     @_machine.output()
     def _closeDuplicateRequest(self, request):
         if request is not self.requestSession.request:
-            message = self.requestSession.closeFrame(DISCONNECT.STILL_OPEN)
-            request.write(message)
-            request.finish()
+            self.requestSession.closeOtherRequest(request,
+                                                  DISCONNECT.STILL_OPEN)
 
     @_machine.output()
     def _loseConnection(self):
@@ -507,8 +515,8 @@ class RequestSessionMachine(object):
     @_machine.output()
     def _writeCloseReason(self, request):
         if self._closeReason:
-            request.write(self.requestSession.closeFrame(self._closeReason))
-        request.finish()
+            self.requestSession.closeOtherRequest(request,
+                                                  self._closeReason)
 
     @_machine.output()
     def _dropRequest(self, reason=protocol.connectionDone):
@@ -678,6 +686,7 @@ class TimeoutClock(object):
     def stop(self):
         if not self.expired and self.timeoutCall is not None:
             self.timeoutCall.cancel()
+            self.timeoutCall = None
 
 
 class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
@@ -690,6 +699,7 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
     This is the base class for polling SockJS transports
 
     """
+    terminationDeferred = None
     request = None
     finishedNotifier = None
 
@@ -699,7 +709,7 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
         self.terminationDeferred = defer.Deferred()
         self.terminationDeferred.addCallback(self._timedOut)
 
-        self.sessionMachine = RequestSessionMachine(self)
+        self.sessionMachine = self.factory.sessionMachineFactory(self)
         self.timeoutClock = self.factory.timeoutClockFactory(
             self.terminationDeferred)
 
@@ -720,7 +730,11 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
         self.sessionMachine.detach()
 
     def write(self, data):
-        self.request.write(data)
+        self.request.write(data + b'\n')
+
+    def closeOtherRequest(self, request, reason):
+        request.write(self.closeFrame(reason) + b'\n')
+        request.finish()
 
     def dataReceived(self, data):
         self.sessionMachine.receive(data)
@@ -740,6 +754,13 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
             self.sessionMachine.loseConnection()
             self.timeoutClock.start()
 
+    def connectionLost(self, reason=protocol.connectionDone):
+        if not self.disconnecting:
+            self.terminationDeferred.errback(reason)
+            self.timeoutClock.stop()
+        self.sessionMachine.connectionLost(reason)
+        self.sessionMachine = None
+
     def registerProducer(self, producer, streaming):
         # TODO: implement this!
         raise NotImplementedError
@@ -754,13 +775,6 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
         self.disconnecting = 1
         self.connectionLost()
 
-    def connectionLost(self, reason=protocol.connectionDone):
-        if not self.disconnecting:
-            self.terminationDeferred.errback(reason)
-            self.timeoutClock.stop()
-        self.sessionMachine.connectionLost(reason)
-        self.sessionMachine = None
-
     def beginRequest(self):
         self.finishedNotifier = self.request.notifyFinish()
         self.finishedNotifier.addErrback(_trapCancellation)
@@ -772,14 +786,14 @@ class RequestSessionProtocolWrapper(SockJSWireProtocolWrapper):
         protocol.Protocol.makeConnection(self, request.transport)
         self.factory.registerProtocol(self)
 
-    def completeConnection(self, request):
+    def completeConnection(self):
         self.wrappedProtocol.makeConnection(self)
-
-    def completeWrite(self, data):
-        SockJSWireProtocolWrapper.writeData(self, data)
 
     def completeDataReceived(self, data):
         SockJSWireProtocolWrapper.dataReceived(self, data)
+
+    def completeWrite(self, data):
+        SockJSWireProtocolWrapper.writeData(self, data)
 
     def completeHeartbeat(self):
         SockJSWireProtocolWrapper.writeHeartbeat(self)
@@ -810,6 +824,9 @@ class RequestSessionWrappingFactory(SockJSWireProtocolWrappingFactory):
                                                    jsonDecoder=jsonDecoder)
         self.timeout = timeout
 
+    def sessionMachineFactory(self, protocol):
+        return RequestSessionMachine(protocol)
+
     def timeoutClockFactory(self, terminationDeferred):
         return TimeoutClock(terminationDeferred, self.timeout)
 
@@ -832,7 +849,7 @@ class SessionHouse(object):
         return sessionID
 
     def makeSession(self, sessionID, factory, request):
-        protocol = factory.buildProtocol(request.transport.getHost())
+        protocol = factory.buildProtocol(request.transport.getPeer())
 
         protocol.terminationDeferred.addBoth(self._sessionClosed, sessionID)
         protocol.terminationDeferred.addErrback(eliot.writeFailure)
@@ -888,3 +905,87 @@ class XHRSession(RequestSessionProtocolWrapper):
 
 class XHRSessionFactory(RequestSessionWrappingFactory):
     protocol = XHRSession
+
+
+class WebSocketProtocolWrapper(SockJSWireProtocolWrapper):
+
+    def jsonReceived(self, decoded):
+        if decoded:
+            SockJSWireProtocolWrapper.jsonReceived(self, decoded)
+
+    def dataReceived(self, data):
+        if not data:
+            return
+        try:
+            SockJSWireProtocolWrapper.dataReceived(self, data)
+        except InvalidData:
+            self.loseConnection()
+
+
+class WebSocketWrappingFactory(SockJSWireProtocolWrappingFactory):
+    protocol = WebSocketProtocolWrapper
+
+
+class _WebSocketServerProtocol(WrappingWebSocketServerProtocol):
+    '''Autobahn's WrappingWebSocketServerProtocol requires that text
+    frames be base64 encoded.  This breaks SockJS (and presumably many
+    other things).  Furthermore, it calls the wrapped protocol's
+    connectionMade directly rather than calling its makeConnection.
+    This class fixes both of these issues.
+
+    '''
+
+    def onConnect(self, request):
+        # base64 is not required for text frames
+        self._binaryMode = any(b'binary' in p for p in request.protocols)
+
+    def onOpen(self):
+        # override default behavior of calling connectionMade directly
+        self._proto.makeConnection(self)
+
+    def write(self, data):
+        # base64 is not required for text frames
+        assert type(data) == bytes
+        if self._binaryMode:
+            self.sendMessage(data, isBinary=True)
+        else:
+            self.sendMessage(data, isBinary=False)
+
+    def onMessage(self, payload, isBinary):
+        # base64 is not required for text frames
+        if isBinary != self._binaryMode:
+            self.failConnection(
+                WebSocketProtocol.CLOSE_STATUS_CODE_UNSUPPORTED_DATA,
+                "message payload type does not match"
+                " the negotiated subprotocol")
+        else:
+            self._proto.dataReceived(payload)
+
+
+class WebSocketSessionFactory(WrappingWebSocketServerFactory):
+
+    def __init__(self, wrappedFactory, jsonEncoder=None, jsonDecoder=None,
+                 reactor=None,
+                 enableCompression=True,
+                 autoFragmentSize=0,
+                 subprotocol=None,
+                 debug=False):
+
+        sockJSWrappedFactory = WebSocketWrappingFactory(
+            wrappedFactory)
+        WrappingWebSocketServerFactory.__init__(
+            self,
+            sockJSWrappedFactory,
+            url=None,
+            reactor=reactor,
+            enableCompression=enableCompression,
+            autoFragmentSize=autoFragmentSize,
+            subprotocol=subprotocol,
+            debug=debug)
+
+    def buildProtocol(self, addr):
+        proto = _WebSocketServerProtocol()
+        proto.factory = self
+        proto._proto = self._factory.buildProtocol(addr)
+        proto._proto.transport = proto
+        return proto
