@@ -12,7 +12,7 @@ python -c 'import sys, txdarn.protocol as P; \
 import txaio
 txaio.use_twisted()
 
-from autobahn.websocket import protocol as WebSocketProtocol
+from autobahn.websocket.protocol import WebSocketProtocol
 from autobahn.twisted.websocket import (WrappingWebSocketServerFactory,
                                         WrappingWebSocketServerProtocol)
 from automat import MethodicalMachine
@@ -927,14 +927,24 @@ class WebSocketWrappingFactory(SockJSWireProtocolWrappingFactory):
 
 
 class _WebSocketServerProtocol(WrappingWebSocketServerProtocol):
+    '''Autobahn's WrappingWebSocketServerProtocol requires that text
+    frames be base64 encoded.  This breaks SockJS (and presumably many
+    other things).  Furthermore, it calls the wrapped protocol's
+    connectionMade directly rather than calling its makeConnection.
+    This class fixes both of these issues.
+
+    '''
 
     def onConnect(self, request):
+        # base64 is not required for text frames
         self._binaryMode = any(b'binary' in p for p in request.protocols)
 
     def onOpen(self):
+        # override default behavior of calling connectionMade directly
         self._proto.makeConnection(self)
 
     def write(self, data):
+        # base64 is not required for text frames
         assert type(data) == bytes
         if self._binaryMode:
             self.sendMessage(data, isBinary=True)
@@ -942,6 +952,7 @@ class _WebSocketServerProtocol(WrappingWebSocketServerProtocol):
             self.sendMessage(data, isBinary=False)
 
     def onMessage(self, payload, isBinary):
+        # base64 is not required for text frames
         if isBinary != self._binaryMode:
             self.failConnection(
                 WebSocketProtocol.CLOSE_STATUS_CODE_UNSUPPORTED_DATA,

@@ -1,6 +1,8 @@
 import io
 import json
 
+import autobahn.websocket.types as A
+
 from twisted.trial import unittest
 from twisted.internet import error
 from twisted.internet.defer import Deferred, DeferredList
@@ -156,13 +158,19 @@ class SockJSWireProtocolWrapperTestCase(unittest.TestCase):
         self.connectionsLost = []
         self.wrappedFactory = RecordingProtocolFactory(self.receivedData,
                                                        self.connectionsLost)
-        self.factory = P.SockJSWireProtocolWrappingFactory(
-            self.wrappedFactory)
+        self.factory = self.makeFactory()
 
         self.address = IPv4Address('TCP', '127.0.0.1', 80)
 
         self.protocol = self.factory.buildProtocol(self.address)
         self.protocol.makeConnection(self.transport)
+
+    def makeFactory(self):
+        '''Returns the WrappingFactory for this test case.  Override me in
+        subclasses that test different session wrapper protocols.
+
+        '''
+        return P.SockJSWireProtocolWrappingFactory(self.wrappedFactory)
 
     def test_writeOpen(self):
         '''writeOpen writes a single open frame.'''
@@ -213,7 +221,7 @@ class SockJSWireProtocolWrapperTestCase(unittest.TestCase):
         self.assertFalse(self.receivedData)
 
     def test_badJSONReceived(self):
-        '''The wrapped protocol does not receive malform JSON and the sender
+        '''The wrapped protocol does not receive malformed JSON and the sender
         receives an error message.
 
         '''
@@ -1028,13 +1036,20 @@ class RequestSessionProtocolWrapperTestCase(unittest.TestCase):
         # now it seems the answer is no, because it's better to test
         # the protocol wrapping functionality against the generic
         # interface.
-        self.factory = P.RequestSessionWrappingFactory(self.wrappedFactory)
+        self.factory = self.makeFactory()
         self.factory.timeoutClockFactory = self.fakeTimeoutClockFactory
         self.factory.sessionMachineFactory = self.fakeSessionMachineFactory
 
         self.address = IPv4Address('TCP', '127.0.0.1', 80)
         self.protocol = self.factory.buildProtocol(self.address)
         self.request = DummyRequest([b'ignored'])
+
+    def makeFactory(self):
+        '''Returns the WrappingFactory for this test case.  Override me in
+        subclasses that test different session wrapper protocols.
+
+        '''
+        return P.RequestSessionWrappingFactory(self.wrappedFactory)
 
     def fakeTimeoutClockFactory(self, terminationDeferred):
         return self.timeoutClock
@@ -1463,3 +1478,167 @@ class SessionHouseTestCase(unittest.TestCase):
 
         self.assertTrue(self.sessions.writeToSession(self.request))
         self.assertEqual(self.recorder.receivedData, [data])
+
+
+class XHRSessionTestCase(RequestSessionProtocolWrapperTestCase):
+
+    def makeFactory(self):
+        return P.XHRSessionFactory(self.wrappedFactory)
+
+    def test_writeOpen(self):
+        '''XHRSession detaches the request immediately after writing an open
+        frame.
+
+        '''
+        self.protocol.request = self.request
+        self.protocol.writeOpen()
+        self.assertEqual(self.sessionMachineRecorder.detachCalls, 1)
+
+    def test_writeData(self):
+        '''XHRSession detaches the request immediately after writing any
+        data frame.
+
+        '''
+        self.protocol.request = self.request
+        self.protocol.writeData(['ignored'])
+        self.assertEqual(self.sessionMachineRecorder.detachCalls, 1)
+
+
+class WebSocketProtocolWrapperTestCase(SockJSWireProtocolWrapperTestCase):
+
+    def makeFactory(self):
+        return P.WebSocketWrappingFactory(self.wrappedFactory)
+
+    def test_emptyDataReceived(self):
+        '''dataReceived silently discards empty strings and does not call the
+        wrapped protocol's dataReceived.
+
+        '''
+        self.protocol.dataReceived(b'')
+        self.assertFalse(self.receivedData)
+
+    def test_badJSONReceived(self):
+        '''dataReceived silently closes the connection upon receipt of
+        malformed JSON and does not call the wrapped protocol's
+        dataReceived.
+
+        '''
+        self.protocol.dataReceived(b'!!!')
+        self.assertTrue(self.transport.disconnecting)
+        self.assertFalse(self.receivedData)
+
+
+class WebSocketServerProtocolTestCase(unittest.TestCase):
+
+    def setUp(self):
+        self.receivedData = []
+        self.connectionsLost = []
+        self.wrappedFactory = RecordingProtocolFactory(self.receivedData,
+                                                       self.connectionsLost)
+        buildProtocol = self.wrappedFactory.buildProtocol
+
+        def _buildProtocol(addr):
+            self.wrappedProtocol = buildProtocol(addr)
+            return self.wrappedProtocol
+
+        self.wrappedFactory.buildProtocol = _buildProtocol
+
+        self.factory = P.WebSocketSessionFactory(self.wrappedFactory)
+
+        self.address = IPv4Address('TCP', '127.0.0.1', 80)
+        self.protocol = self.factory.buildProtocol(self.address)
+
+    def makeFakeRequest(self):
+        '''This is laborious enough to warrant its own shortcut.'''
+        return A.ConnectionRequest(peer='ignored',
+                                   headers={},
+                                   host='ignored',
+                                   path='ignored',
+                                   params={},
+                                   version=-1,
+                                   origin=None,
+                                   protocols=[],
+                                   extensions=[])
+
+    def test_onConnect_text(self):
+        '''onConnect sets _binaryMode to True iff one of the protocols has
+        'binary' in it.
+        '''
+        notBinary = self.makeFakeRequest()
+        self.protocol.onConnect(notBinary)
+        self.assertFalse(self.protocol._binaryMode)
+
+    def test_onConnect_binary(self):
+        '''onConnect sets _binaryMode to True iff one of the protocols has
+        'binary' in it.
+        '''
+        binary = self.makeFakeRequest()
+        binary.protocols.append(b'binary')
+        self.protocol.onConnect(binary)
+        self.assertTrue(self.protocol._binaryMode)
+
+    def test_onOpen(self):
+        '''onOpen calls the underlying protocol's makeConnection method with
+        _WebSocketServerProtocol instance as the transport.
+
+        '''
+        self.protocol.onOpen()
+        self.assertEqual(self.wrappedProtocol.connectionMadeCalls, 1)
+
+    def test_write_text(self):
+        '''write does base64 encode text data.'''
+        # autobahn is very difficult to test -- fake out the
+        # sendMessage method
+
+        sentMessages = []
+
+        def recordSendMessage(data, isBinary):
+            sentMessages.append((data, isBinary))
+
+        self.test_onConnect_text()
+        self.protocol.sendMessage = recordSendMessage
+
+        self.protocol.write(b'some data')
+        self.assertEqual(sentMessages, [(b'some data', False)])
+
+    def test_write_binary(self):
+        '''write does base64 encode binary data.'''
+        sentMessages = []
+
+        def recordSendMessage(data, isBinary):
+            sentMessages.append((data, isBinary))
+
+        self.test_onConnect_binary()
+        self.protocol.sendMessage = recordSendMessage
+
+        self.protocol.write(b'some data')
+        self.assertEqual(sentMessages, [(b'some data', True)])
+
+    def test_onMessage_succeeds(self):
+        '''When the received message matches the binary mode of the
+        connection, the underlying protocol receives the message as
+        deserialized JSON.
+
+        '''
+        self.test_onConnect_text()
+        self.protocol.onMessage(b'["some data"]', isBinary=False)
+        self.assertEqual(self.receivedData, [['some data']])
+
+    def test_onMessage_is_binary_disagreement(self):
+        '''When the received message does not match the binary mode of the
+        connection, the connection fails and the underlying protocol
+        does not receive the message.
+
+        '''
+        failedConnectionReasons = []
+
+        def recordFailConnection(reason, message):
+            failedConnectionReasons.append(reason)
+
+        self.test_onConnect_binary()
+        self.protocol.failConnection = recordFailConnection
+
+        self.protocol.onMessage(b'["some data"]', isBinary=False)
+        self.assertEqual(self.receivedData, [])
+        self.assertEqual(failedConnectionReasons, [
+            self.protocol.CLOSE_STATUS_CODE_UNSUPPORTED_DATA])
