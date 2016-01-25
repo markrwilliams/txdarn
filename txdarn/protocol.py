@@ -286,10 +286,12 @@ class SockJSWireProtocolWrapper(ProtocolWrapper):
     def writeClose(self, reason):
         self.write(self.closeFrame(reason))
 
-    def writeData(self, data):
+    def dataFrame(self, data):
         frameValue = [b'a', sockJSJSON(data, cls=self.jsonEncoder)]
-        frame = b''.join(frameValue)
-        self.write(frame)
+        return b''.join(frameValue)
+
+    def writeData(self, data):
+        self.write(self.dataFrame(data))
 
 
 class SockJSWireProtocolWrappingFactory(WrappingFactory):
@@ -905,6 +907,31 @@ class XHRSession(RequestSessionProtocolWrapper):
 
 class XHRSessionFactory(RequestSessionWrappingFactory):
     protocol = XHRSession
+
+
+class XHRStreamingSession(RequestSessionProtocolWrapper):
+    prelude = b'h' * 2048
+    bytesWritten = 0
+
+    def writeOpen(self):
+        self.write(self.prelude)
+        RequestSessionProtocolWrapper.writeOpen(self)
+
+    def writeData(self, data):
+        frame = RequestSessionProtocolWrapper.dataFrame(self, data)
+        self.write(frame)
+        self.bytesWritten += len(frame)
+        if self.bytesWritten >= self.factory.maximumBytes:
+            self.bytesWritten = 0
+            self.detachFromRequest()
+
+
+class XHRStreamingSessionFactory(RequestSessionWrappingFactory):
+    protocol = XHRStreamingSession
+
+    def __init__(self, maximumBytes, *args, **kwargs):
+        RequestSessionWrappingFactory.__init__(self, *args, **kwargs)
+        self.maximumBytes = maximumBytes
 
 
 class WebSocketProtocolWrapper(SockJSWireProtocolWrapper):

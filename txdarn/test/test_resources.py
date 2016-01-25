@@ -7,7 +7,7 @@ from twisted.internet import defer
 from twisted.trial import unittest
 from twisted.web import http
 from twisted.web import template
-from twisted.web import server, http
+from twisted.web import server
 from twisted.web.resource import Resource
 from twisted.web.test import requesthelper
 
@@ -441,9 +441,11 @@ class FakeSessionHouse(object):
         return True
 
 
-class XHRResourceTestCase(OptionsTestCaseMixin, unittest.TestCase):
+class _XHRTestCase(object):
     # XXX what test strategy for applyPolicies?  is there a better
     # option than checking the serialized values of the headers?
+    resourceName = None
+    factoryType = None
 
     def setUp(self):
         self.fakeFactory = 'Fake Factory'
@@ -452,14 +454,11 @@ class XHRResourceTestCase(OptionsTestCaseMixin, unittest.TestCase):
         self.timeout = 123.0
         self.xhr = self.resourceClass()
 
-    def resourceClass(self):
-        return R.XHRResource(self.fakeFactory, self.sessions, self.timeout)
-
     def test_postSuccess(self):
         '''POSTing to an XHRResource results in a 200 and NOT_DONE_YET.'''
         request = DummyRequestResponseHeaders([b'serverID',
                                                b'sessionID',
-                                               b'xhr'])
+                                               self.resourceName])
         request.method = b'POST'
 
         result = self.xhr.render(request)
@@ -469,7 +468,7 @@ class XHRResourceTestCase(OptionsTestCaseMixin, unittest.TestCase):
         [(actualFactory,
           actualRequest)] = self.sessionRecorder.requestsMaybeAttached
 
-        self.assertIsInstance(actualFactory, P.XHRSessionFactory)
+        self.assertIsInstance(actualFactory, self.factoryType)
         self.assertIs(actualRequest, request)
 
         contentType = (b'Content-Type',
@@ -504,7 +503,7 @@ class XHRResourceTestCase(OptionsTestCaseMixin, unittest.TestCase):
         '''
         request = DummyRequestResponseHeaders([b'serverID',
                                                b'sessionID',
-                                               b'xhr'])
+                                               self.resourceName])
         request.method = b'POST'
 
         def attachToSession(*args, **kwargs):
@@ -520,6 +519,28 @@ class XHRResourceTestCase(OptionsTestCaseMixin, unittest.TestCase):
         self.assertEqual(request.responseCode, http.NOT_FOUND)
         self.assertIn(contentType, request.sortedResponseHeaders)
         self.assertFalse(result)
+
+
+class XHRResourceTestCase(OptionsTestCaseMixin, _XHRTestCase,
+                          unittest.TestCase):
+    resourceName = b'xhr'
+    factoryType = P.XHRSessionFactory
+
+    def resourceClass(self):
+        return R.XHRResource(self.fakeFactory, self.sessions, self.timeout)
+
+
+class XHRStreamingResourceTestCase(OptionsTestCaseMixin, _XHRTestCase,
+                                   unittest.TestCase):
+    resourceName = b'xhr_streaming'
+    factoryType = P.XHRStreamingSessionFactory
+    maximumBytes = 123
+
+    def resourceClass(self):
+        return R.XHRStreamingResource(self.fakeFactory,
+                                      self.sessions,
+                                      self.maximumBytes,
+                                      self.timeout)
 
 
 class XHRSendResourceTestCase(OptionsTestCaseMixin, unittest.TestCase):

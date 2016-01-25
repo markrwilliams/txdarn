@@ -402,6 +402,8 @@ class XHRResource(_OptionsMixin, HeaderPolicyApplyingResource):
          b'OPTIONS': (DEFAULT_CACHEABLE_POLICY,
                       DEFAULT_ACCESS_CONTROL_POLICY)})
 
+    _name = b'xhr'
+
     def __init__(self, factory, sessions, timeout, policies=None):
         HeaderPolicyApplyingResource.__init__(self, policies)
         self.factory = protocol.XHRSessionFactory(factory, timeout)
@@ -415,12 +417,26 @@ class XHRResource(_OptionsMixin, HeaderPolicyApplyingResource):
     @encoding.contentType(b'application/javascript')
     def render_POST(self, request):
         self.applyPolicies(request)
-        if (request.postpath[-1] == b'xhr' and
+        if (request.postpath[-1] == self._name and
            self.sessions.attachToSession(self.factory, request)):
             return server.NOT_DONE_YET
 
         request.setResponseCode(http.NOT_FOUND)
         return encoding.EMPTY
+
+
+class XHRStreamingResource(XHRResource):
+    """Read side of the XHR streaming transport."""
+
+    _name = b'xhr_streaming'
+
+    def __init__(self, factory, sessions, maximumBytes, timeout,
+                 policies=None):
+        HeaderPolicyApplyingResource.__init__(self, policies)
+        self.factory = protocol.XHRStreamingSessionFactory(maximumBytes,
+                                                           factory,
+                                                           timeout)
+        self.sessions = sessions
 
 
 class XHRSendResource(_OptionsMixin, HeaderPolicyApplyingResource):

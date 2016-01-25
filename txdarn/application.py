@@ -36,6 +36,13 @@ class TxDarn(object):
         self._xhrResource = R.XHRResource(self._sockJSFactory,
                                           self._sessions,
                                           timeout=config['timeout'])
+        self._xhrStreamingResource = R.XHRStreamingResource(
+            self._sockJSFactory,
+            self._sessions,
+            maximumBytes=config['maximumBytes'],
+            timeout=config['timeout'])
+        self._xhrSendResource = R.XHRSendResource(self._sessions)
+
         self._xhrSendResource = R.XHRSendResource(self._sessions)
 
         websocketFactory = P.WebSocketSessionFactory(self._sockJSFactory)
@@ -61,6 +68,13 @@ class TxDarn(object):
                                 _convertPostpathString(sessionID),
                                 b'xhr']
             return self._xhrResource
+
+        @sessionApp.route('/xhr_streaming')
+        def xhr_streaming(self, request, serverID, sessionID):
+            request.postpath = [_convertPostpathString(serverID),
+                                _convertPostpathString(sessionID),
+                                b'xhr']
+            return self._xhrStreamingResource
 
         @sessionApp.route('/xhr_send')
         def xhr_send(self, request, serverID, sessionID):
