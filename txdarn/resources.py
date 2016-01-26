@@ -1,4 +1,5 @@
 import random
+import re
 import hashlib
 import functools
 import pkgutil
@@ -6,6 +7,7 @@ import time
 from collections import namedtuple
 from wsgiref.handlers import format_date_time
 
+from autobahn.twisted.resource import WebSocketResource
 import eliot
 from twisted.web import resource, template, http, server
 
@@ -261,7 +263,6 @@ class _OptionsMixin(resource.Resource):
 
 
 class Greeting(resource.Resource):
-    isLeaf = True
     allowedMethods = (b'GET',)
 
     @encoding.contentType(b'text/plain')
@@ -301,7 +302,6 @@ class IFrameElement(template.Element):
 
 
 class IFrameResource(HeaderPolicyApplyingResource):
-    isLeaf = True
     allowedMethods = (b'GET',)
 
     policies = ImmutableDict(
@@ -336,7 +336,6 @@ class IFrameResource(HeaderPolicyApplyingResource):
         hashed = hashlib.sha256(self.iframe).hexdigest()
         self.etag = compat.networkString(hashed)
 
-    @encoding.contentType(b'text/html')
     def render_GET(self, request):
         if request.setETag(self.etag) is http.CACHED:
             return b''
@@ -402,7 +401,7 @@ class XHRResource(_OptionsMixin, HeaderPolicyApplyingResource):
          b'OPTIONS': (DEFAULT_CACHEABLE_POLICY,
                       DEFAULT_ACCESS_CONTROL_POLICY)})
 
-    _name = b'xhr'
+    resourceName = b'xhr'
 
     def __init__(self, factory, sessions, timeout, policies=None):
         HeaderPolicyApplyingResource.__init__(self, policies)
@@ -417,7 +416,7 @@ class XHRResource(_OptionsMixin, HeaderPolicyApplyingResource):
     @encoding.contentType(b'application/javascript')
     def render_POST(self, request):
         self.applyPolicies(request)
-        if (request.postpath[-1] == self._name and
+        if (request.postpath[-1] == self.resourceName and
            self.sessions.attachToSession(self.factory, request)):
             return server.NOT_DONE_YET
 
@@ -428,7 +427,7 @@ class XHRResource(_OptionsMixin, HeaderPolicyApplyingResource):
 class XHRStreamingResource(XHRResource):
     """Read side of the XHR streaming transport."""
 
-    _name = b'xhr_streaming'
+    resourceName = b'xhr_streaming'
 
     def __init__(self, factory, sessions, maximumBytes, timeout,
                  policies=None):
@@ -443,6 +442,8 @@ class XHRSendResource(_OptionsMixin, HeaderPolicyApplyingResource):
     """Write side of the XHR polling transport."""
     allowedMethods = (b'POST', b'OPTIONS')
     isLeaf = True
+
+    resourceName = b'xhr_send'
 
     policies = ImmutableDict(
         {b'POST': (DEFAULT_UNCACHEABLE_POLICY,
@@ -464,7 +465,7 @@ class XHRSendResource(_OptionsMixin, HeaderPolicyApplyingResource):
     def render_POST(self, request):
         self.applyPolicies(request)
         try:
-            if (request.postpath[-1] == b'xhr_send' and
+            if (request.postpath[-1] == self.resourceName and
                self.sessions.writeToSession(request)):
                 request.setResponseCode(http.NO_CONTENT)
             else:
@@ -473,3 +474,69 @@ class XHRSendResource(_OptionsMixin, HeaderPolicyApplyingResource):
             request.setResponseCode(http.INTERNAL_SERVER_ERROR)
             return invalidException.reason
         return encoding.EMPTY
+
+
+class SockJSWebSocketResource(WebSocketResource):
+    resourceName = b'websocket'
+
+    def __init__(self, wrappedFactory):
+        wsFactory = protocol.WebSocketSessionFactory(wrappedFactory)
+        WebSocketResource.__init__(self, wsFactory)
+
+
+class TxDarn(resource.Resource):
+    MATCH_IFRAME = re.compile(b'\Aiframe.*\.html\Z')
+
+    def __init__(self, factory, sockJSURL,
+                 websocketsEnabled=True,
+                 timeout=5.0,
+                 maximumBytes=4096):
+        resource.Resource.__init__(self)
+        self.transports = {}
+        self.sockJSFactory = protocol.SockJSProtocolFactory(factory)
+
+        self.greeting = Greeting()
+        self.iframe = IFrameResource(sockJSURL)
+        self.info = InfoResource(websocketsEnabled)
+
+        self.sessions = protocol.SessionHouse()
+
+        self.addTransport(
+            XHRResource(self.sockJSFactory,
+                        self.sessions,
+                        timeout=timeout))
+        self.addTransport(
+            XHRStreamingResource(self.sockJSFactory,
+                                 self.sessions,
+                                 maximumBytes=maximumBytes,
+                                 timeout=timeout))
+        self.addTransport(XHRSendResource(self.sessions))
+
+        if websocketsEnabled:
+            self.addTransport(SockJSWebSocketResource(self.sockJSFactory))
+
+        # establish simple, static routes by calling the superclass'
+        # putChild, as this class' putChild is disabled
+        resource.Resource.putChild(self, b'', self.greeting)
+        resource.Resource.putChild(self, b'info', self.info)
+
+    def addTransport(self, transport):
+        self.transports[transport.resourceName] = transport
+
+    def render(self, request):
+        # handle absence trailing /
+        return self.greeting.render(request)
+
+    def getChild(self, path, request):
+        if self.MATCH_IFRAME.match(path):
+            return self.iframe
+        try:
+            request.postpath.insert(0, path)
+            return self.transports[request.postpath[-1]]
+        except KeyError:
+            return resource.NoResource()
+
+    def putChild(self, path, child):
+        name = self.__class__.__name__
+        raise RuntimeError('You cannot add children to {}'
+                           ' instances'.format(name))

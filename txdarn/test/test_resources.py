@@ -8,7 +8,7 @@ from twisted.trial import unittest
 from twisted.web import http
 from twisted.web import template
 from twisted.web import server
-from twisted.web.resource import Resource
+from twisted.web.resource import Resource, getChildForRequest, NoResource
 from twisted.web.test import requesthelper
 
 from zope.interface import implementer
@@ -644,3 +644,102 @@ class XHRSendResourceTestCase(OptionsTestCaseMixin, unittest.TestCase):
         self.assertEqual(request.responseCode, http.INTERNAL_SERVER_ERROR)
         self.assertIn(contentType, request.sortedResponseHeaders)
         self.assertEqual(result, b"It was bad!")
+
+
+class TxDarnTestCase(unittest.TestCase):
+
+    def setUp(self):
+        self.request = requesthelper.DummyRequest([])
+        self.txdarn = R.TxDarn(factory='ignored', sockJSURL='http://ignored')
+
+    def test_websocketsEnabled(self):
+        '''The websocketsEnabled argument disables or enables the websocket
+        transport.
+
+        '''
+        kwargs = {'factory': 'blah', 'sockJSURL': 'http://blah'}
+        # the default is True
+        wsDefaultDarn = R.TxDarn(**kwargs)
+        self.assertIn(R.SockJSWebSocketResource.resourceName,
+                      wsDefaultDarn.transports)
+
+        wsDarn = R.TxDarn(websocketsEnabled=True, **kwargs)
+        self.assertIn(R.SockJSWebSocketResource.resourceName,
+                      wsDarn.transports)
+
+        noWSDarn = R.TxDarn(websocketsEnabled=False, **kwargs)
+        self.assertNotIn(R.SockJSWebSocketResource.resourceName,
+                         noWSDarn.transports)
+
+    def test_greeting_direct_render(self):
+        '''The Greeting resource must be accessible directly from the TxDarn
+        resource.
+
+        '''
+        renderCalls = []
+
+        class RecordsRender(object):
+
+            def render(self, request):
+                renderCalls.append(request)
+
+        self.txdarn.greeting = RecordsRender()
+
+        self.txdarn.render(self.request)
+        self.assertEqual(renderCalls, [self.request])
+
+    def test_greeting_trailing_slash(self):
+        '''The Greeting resource must be accessible as the direct child of the
+        TxDarn resource (i.e., with a trailing slash).
+
+        '''
+        # a trailing slash -- empty string in postpath
+        self.request.postpath = [b'']
+        resrc = getChildForRequest(self.txdarn, self.request)
+        self.assertIs(resrc, self.txdarn.greeting)
+
+    def test_info(self):
+        '''The Info resource must be accessible as the "info" child of the
+        TxDarn resource.
+
+        '''
+        self.request.postpath = [b'info']
+        resrc = getChildForRequest(self.txdarn, self.request)
+        self.assertIs(resrc, self.txdarn.info)
+
+    def test_getChild(self):
+        '''getChild returns the IFrame resource when its path matches the
+        iframe pattern.  Otherwise it reassembles the postpath and
+        returns the appropriate transport, if any.
+
+        '''
+        # the IFrame resource isn't a leaf resource, so it will raise
+        # a 404 if there's anything in postpath
+        for validIFrame in (b'iframe.html', b'iframe.garbage.html'):
+            resrc = self.txdarn.getChild(validIFrame, self.request)
+            self.assertIs(resrc, self.txdarn.iframe)
+
+        # server & session id validation occurs in each transport, as
+        # appropriate
+        for transport, transportResource in self.txdarn.transports.items():
+            self.request.postpath = [transport]
+            resrc = self.txdarn.getChild(b'ignored', self.request)
+            self.assertIs(resrc, transportResource)
+
+    def test_getChild_unknown_transport(self):
+        '''A request with a non-iframe path and an unknown transport results
+        in a 404.
+
+        '''
+        resrc = self.txdarn.getChild(b'unknown-transport', self.request)
+        self.assertIsInstance(resrc, NoResource)
+
+    def test_putChild_disable(self):
+        '''Trying to add a child to a TxDarn instance results in a
+        RuntimeError.
+
+        '''
+        with self.assertRaises(RuntimeError) as cm:
+            self.txdarn.putChild(b'ignored', b'ignored')
+
+        self.assertIn(self.txdarn.__class__.__name__, str(cm.exception))

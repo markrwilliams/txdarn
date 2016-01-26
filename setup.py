@@ -16,5 +16,4 @@ setup(name='txdarn',
                         'eliot',
                         'six',
                         'autobahn>0.11.0',
-                        'klein',
                         'automat>=0.3.0'])
