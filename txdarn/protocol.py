@@ -286,12 +286,10 @@ class SockJSWireProtocolWrapper(ProtocolWrapper):
     def writeClose(self, reason):
         self.write(self.closeFrame(reason))
 
-    def dataFrame(self, data):
-        frameValue = [b'a', sockJSJSON(data, cls=self.jsonEncoder)]
-        return b''.join(frameValue)
-
     def writeData(self, data):
-        self.write(self.dataFrame(data))
+        frameValue = [b'a', sockJSJSON(data, cls=self.jsonEncoder)]
+        data = b''.join(frameValue)
+        self.write(data)
 
 
 class SockJSWireProtocolWrappingFactory(WrappingFactory):
@@ -917,10 +915,9 @@ class XHRStreamingSession(RequestSessionProtocolWrapper):
         self.write(self.prelude)
         RequestSessionProtocolWrapper.writeOpen(self)
 
-    def writeData(self, data):
-        frame = RequestSessionProtocolWrapper.dataFrame(self, data)
-        self.write(frame)
-        self.bytesWritten += len(frame)
+    def completeWrite(self, data):
+        RequestSessionProtocolWrapper.completeWrite(self, data)
+        self.bytesWritten += sum(map(len, data))
         if self.bytesWritten >= self.factory.maximumBytes:
             self.bytesWritten = 0
             self.detachFromRequest()
