@@ -992,8 +992,7 @@ class WebSocketSessionFactory(WrappingWebSocketServerFactory):
                  reactor=None,
                  enableCompression=True,
                  autoFragmentSize=0,
-                 subprotocol=None,
-                 debug=False):
+                 subprotocol=None):
 
         sockJSWrappedFactory = WebSocketWrappingFactory(
             wrappedFactory)
@@ -1004,8 +1003,7 @@ class WebSocketSessionFactory(WrappingWebSocketServerFactory):
             reactor=reactor,
             enableCompression=enableCompression,
             autoFragmentSize=autoFragmentSize,
-            subprotocol=subprotocol,
-            debug=debug)
+            subprotocol=subprotocol)
 
     def buildProtocol(self, addr):
         proto = _WebSocketServerProtocol()
