@@ -1522,17 +1522,17 @@ class XHRStreamingSessionTestCase(RequestSessionProtocolWrapperTestCase):
                                                 b'o\n'])
         self.assertEqual(self.sessionMachineRecorder.detachCalls, 0)
 
-    def test_writeData(self):
+    def test_completeWrite(self):
         '''XHRStreamingSession detaches the request after writing at least
         maximumBytes.
 
         '''
         self.protocol.request = self.request
 
-        self.protocol.writeData(['ignored'])
+        self.protocol.completeWrite(['ignored'])
         self.assertEqual(self.sessionMachineRecorder.detachCalls, 0)
 
-        self.protocol.writeData(['ignored' * self.maximumBytes])
+        self.protocol.completeWrite(['ignored' * self.maximumBytes])
         self.assertEqual(self.sessionMachineRecorder.detachCalls, 1)
 
 

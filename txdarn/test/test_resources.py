@@ -6,6 +6,7 @@ import eliot.testing
 from twisted.internet import defer
 from twisted.trial import unittest
 from twisted.web import http
+from twisted.web import http_headers
 from twisted.web import template
 from twisted.web import server
 from twisted.web.resource import Resource, getChildForRequest, NoResource
@@ -96,20 +97,21 @@ class CachePolicyTestCase(PolicyTestCase):
         '''
         cacheDirectives and expiresOffset can assign headers to enable caching
         '''
-        expectedHeaders = {}
+        expectedHeaders = http_headers.Headers()
 
         cacheDirectives = (R.PUBLIC, R.MAX_AGE(1234))
-        expectedHeaders[b'cache-control'] = b'public, max-age=1234'
+        expectedHeaders.addRawHeader(b'cache-control', b'public, max-age=1234')
 
         expiresOffset = 1234
         fakeNow = lambda: 1234
-        expectedHeaders[b'expires'] = b'Thu, 01 Jan 1970 00:41:08 GMT'
+        expectedHeaders.addRawHeader(b'expires',
+                                     b'Thu, 01 Jan 1970 00:41:08 GMT')
 
         policy = R.CachePolicy(cacheDirectives=cacheDirectives,
                                expiresOffset=expiresOffset)
         policy.apply(self.request, now=fakeNow)
 
-        self.assertEqual(self.request.outgoingHeaders, expectedHeaders)
+        self.assertEqual(self.request.responseHeaders, expectedHeaders)
 
     def test_uncacheableApply(self):
         '''
@@ -120,16 +122,18 @@ class CachePolicyTestCase(PolicyTestCase):
                            R.MUST_REVALIDATE,
                            R.MAX_AGE(0))
 
-        expectedHeaders = {b'cache-control':
-                           b'no-store'
-                           b', no-cache, must-revalidate, max-age=0'}
+        expectedHeaders = http_headers.Headers(
+            {
+                b'cache-control':
+                [b'no-store, no-cache, must-revalidate, max-age=0'],
+            })
 
         policy = R.CachePolicy(cacheDirectives=cacheDirectives,
                                expiresOffset=None)
 
         fakeNow = lambda: 1234
         policy.apply(self.request, now=fakeNow)
-        self.assertEqual(self.request.outgoingHeaders, expectedHeaders)
+        self.assertEqual(self.request.responseHeaders, expectedHeaders)
 
 
 class GETPOSTResource(object):
@@ -185,26 +189,33 @@ class AccessControlPolicyTestCase(PolicyTestCase):
         self.assertEqual(preparedAllowHeaders([b'a']), [b'a'])
 
     def test_apply(self):
-        expectedHeaders = {}
+        expectedHeaders = http_headers.Headers()
+        requestHeaders = self.request.requestHeaders
 
         methods = [b'GET', b'POST']
-        expectedHeaders[b'access-control-allow-methods'] = b'GET, POST'
+        expectedHeaders.addRawHeader(b'access-control-allow-methods',
+                                     b'GET, POST')
 
         maxAge = 1234
-        expectedHeaders[b'access-control-max-age'] = b'1234'
+        expectedHeaders.addRawHeader(b'access-control-max-age',
+                                     b'1234')
 
-        self.request.headers[b'origin'] = b'test'
-        expectedHeaders[b'access-control-allow-origin'] = b'test'
-        expectedHeaders[b'access-control-allow-credentials'] = b'true'
+        requestHeaders.addRawHeader('origin', b'test')
+        expectedHeaders.addRawHeader(b'access-control-allow-origin',
+                                     b'test')
+        expectedHeaders.addRawHeader(b'access-control-allow-credentials',
+                                     b'true')
 
-        self.request.headers[b'access-control-request-headers'] = b'a, b, c'
-        expectedHeaders[b'access-control-allow-headers'] = b'a, b, c'
+        requestHeaders.addRawHeader(b'access-control-request-headers',
+                                    b'a, b, c')
+        expectedHeaders.addRawHeader(b'access-control-allow-headers',
+                                     b'a, b, c')
 
         policy = R.AccessControlPolicy(methods=methods,
                                        maxAge=maxAge)
 
         policy.apply(self.request)
-        self.assertEqual(self.request.outgoingHeaders, expectedHeaders)
+        self.assertEqual(self.request.responseHeaders, expectedHeaders)
 
     def test_forResource_inference(self):
         infers = R.AccessControlPolicy(methods=R.INFERRED,
@@ -263,8 +274,8 @@ class HeaderPolicyApplyingResourceTestCase(PolicyTestCase):
         resource = self.TestResource()
         resource.applyPolicies(self.request)
 
-        headerSet = self.request.outgoingHeaders.get(
-            self.recorder.SAW_RESOURCE_HEADER.lower())
+        headerSet = self.request.responseHeaders.hasHeader(
+            self.recorder.SAW_RESOURCE_HEADER)
 
         self.assertTrue(headerSet)
 
@@ -272,8 +283,8 @@ class HeaderPolicyApplyingResourceTestCase(PolicyTestCase):
         resource = self.TestResource(policies={b'GET': ()})
         resource.applyPolicies(self.request)
 
-        headerSet = self.request.outgoingHeaders.get(
-            self.recorder.SAW_RESOURCE_HEADER.lower())
+        headerSet = self.request.responseHeaders.hasHeader(
+            self.recorder.SAW_RESOURCE_HEADER)
 
         self.assertFalse(headerSet)
 
@@ -364,16 +375,23 @@ class OptionsTestCaseMixin:
         optionsResource = self.resourceClass()
 
         written = optionsResource.render(request)
-        outgoingHeaders = request.outgoingHeaders
+        responseHeaders = request.responseHeaders
 
-        cache_control = outgoingHeaders[b'cache-control']
+        cache_control_value = responseHeaders.getRawHeaders(b'cache-control')
+        self.assertEqual(len(cache_control_value), 1)
+        [cache_control] = cache_control_value
         self.assertIn(b'public', cache_control)
         self.assertTrue(re.search(b'max-age=[1-9]\d{6}', cache_control),
                         'SockJS demands a "large" max-age')
 
-        self.assertIn(b'expires', outgoingHeaders)
-        self.assertGreater(int(outgoingHeaders[b'access-control-max-age']),
-                           1000000)
+        self.assertTrue(responseHeaders.hasHeader(b'expires'))
+
+        access_control_max_age_value = responseHeaders.getRawHeaders(
+            b'access-control-max-age')
+        self.assertEqual(len(access_control_max_age_value), 1)
+        [access_control_max_age] = access_control_max_age_value
+        self.assertGreater(int(access_control_max_age), 1000000)
+
         # TODO - test methods
         self.assertFalse(written)
 
