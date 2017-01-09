@@ -1,0 +1,24 @@
+language: python
+cache: pip
+
+install:
+  - pip install codecov tox
+
+matrix:
+  include:
+    - python: "pypy"
+      env: TOXENV=pypy
+    - python: "2.7"
+      env: TOXENV=py27
+    - python: "3.5"
+      env: TOXENV=py35
+
+script:
+  - tox
+
+after_success:
+  - tox -e coverage-report
+  - cd .tox && codecov
+
+notifications:
+  email: false
