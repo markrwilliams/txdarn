@@ -1,5 +1,8 @@
 # txdarn
 
+[![Build Status](https://api.travis-ci.org/markrwilliams/txdarn.svg?branch=master)](https://travis-ci.org/markrwilliams/txdarn)
+[![Coverage Status](https://codecov.io/github/markrwilliams/txdarn/coverage.svg?branch=master)](https://codecov.io/github/markrwilliams/txdarn)
+
 ### SockJS for modern Twisted
 
 #### What is it?
